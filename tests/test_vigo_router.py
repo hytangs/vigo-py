@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import textwrap
 import threading
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -19,7 +20,16 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from pathlib import Path
+
+if sys.argv[1:] == ["--version"]:
+    print(os.environ.get("VIGO_FAKE_VERSION", "0.3.0"))
+    raise SystemExit(0)
+
+if sys.argv[1:] == ["--help"]:
+    print("vigo build-network; vigo route-ndjson; vigo one-to-many; vigo isochrone")
+    raise SystemExit(0)
 
 if os.environ.get("VIGO_FAKE_FAIL") == "1":
     print("fixture CLI failure", file=sys.stderr)
@@ -46,6 +56,8 @@ if capture:
     Path(capture).write_text(json.dumps({"argv": sys.argv[1:], "args": args, "values": values}), encoding="utf-8")
 
 if command == "build-network":
+    if os.environ.get("VIGO_FAKE_HANG_BUILD") == "1":
+        time.sleep(60)
     output_root = Path(args["output-dir"])
     store_path = output_root / "routing" / "project.sqlite"
     street_path = output_root / "osm" / "street-index.sqlite"
@@ -113,6 +125,8 @@ if command == "route-ndjson":
         if not line.strip():
             continue
         request = json.loads(line)
+        if os.environ.get("VIGO_FAKE_HANG_ROUTE") == "1":
+            time.sleep(60)
         if capture:
             Path(capture).write_text(json.dumps({"argv": sys.argv[1:], "args": args, "values": values, "request": request}), encoding="utf-8")
         result_id = str(request.get("id") or f"request_{sequence}")
@@ -205,6 +219,8 @@ if command == "route-ndjson":
     raise SystemExit(0)
 
 if command == "one-to-many":
+    if os.environ.get("VIGO_FAKE_HANG_ANALYSIS") == command:
+        time.sleep(60)
     request = json.loads(Path(args["request"]).read_text(encoding="utf-8"))
     rows = [
         {
@@ -243,6 +259,8 @@ if command == "one-to-many":
     raise SystemExit(0)
 
 if command == "isochrone":
+    if os.environ.get("VIGO_FAKE_HANG_ANALYSIS") == command:
+        time.sleep(60)
     request = json.loads(Path(args["request"]).read_text(encoding="utf-8"))
     size = int(args.get("raster-size", request.get("rasterSize", 96)))
     cutoffs = [float(value) for value in args.get("cutoffs", "15,30,45,60").split(",")]
@@ -339,6 +357,32 @@ def write_street_store(path: Path, schema: str = "vigo.street.store.v1") -> None
             "INSERT INTO metadata VALUES ('storageLayout', '\"runtime-snapshots-v1\"')"
         )
     (path.parent / f"{path.name}.street-accelerator-v7.bin").write_bytes(b"fixture-walk-snapshot")
+
+
+def write_probe_cli(
+    path: Path,
+    *,
+    version: str = "0.3.0",
+    commands: str = "vigo build-network; vigo route-ndjson; vigo one-to-many; vigo isochrone",
+) -> None:
+    path.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/bin/sh
+            if [ "$1" = "--version" ]; then
+              echo {version}
+              exit 0
+            fi
+            if [ "$1" = "--help" ]; then
+              echo '{commands}'
+              exit 0
+            fi
+            exit 0
+            """
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
 
 
 class VigoRouterWrapperTest(unittest.TestCase):
@@ -534,7 +578,8 @@ class VigoRouterWrapperTest(unittest.TestCase):
         close_calls = []
 
         class BlockingSession:
-            def exchange(self, _requests):
+            def exchange(self, _requests, *, timeout):
+                self.timeout = timeout
                 entered.set()
                 if not release.wait(2):
                     raise AssertionError("test exchange was not released")
@@ -550,7 +595,7 @@ class VigoRouterWrapperTest(unittest.TestCase):
         def exchange():
             try:
                 pool.exchange(
-                    object(),
+                    type("Network", (), {"route_timeout": 1.0})(),
                     [{"id": "blocked"}],
                     service_date="2026-07-15",
                     service_day="weekday",
@@ -574,6 +619,40 @@ class VigoRouterWrapperTest(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(len(close_calls), 1)
+
+    def test_resident_route_timeout_kills_and_invalidates_session(self):
+        counter = self.root / "timeout-process-count.txt"
+        network = vigo_router.open_network(
+            self.store,
+            cli=self.cli,
+            route_timeout=0.1,
+        )
+        self.addCleanup(network.close)
+        started = time.monotonic()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "VIGO_FAKE_HANG_ROUTE": "1",
+                    "VIGO_FAKE_PROCESS_COUNTER": str(counter),
+                },
+            ),
+            self.assertRaisesRegex(
+                vigo_router.VigoCliTimeoutError,
+                "route-ndjson timed out after 0.1 seconds",
+            ),
+        ):
+            network.route("A", "B", service_date="2026-07-15")
+        self.assertLess(time.monotonic() - started, 3)
+
+        with patch.dict(
+            os.environ,
+            {"VIGO_FAKE_PROCESS_COUNTER": str(counter)},
+            clear=False,
+        ):
+            recovered = network.route("A", "B", service_date="2026-07-15")
+        self.assertEqual(recovered.status, "ready")
+        self.assertEqual(counter.read_text(encoding="utf-8"), "2")
 
     def test_route_recovers_once_after_resident_process_crash(self):
         counter = self.root / "process-count.txt"
@@ -661,6 +740,25 @@ class VigoRouterWrapperTest(unittest.TestCase):
         invocation = json.loads(capture.read_text(encoding="utf-8"))
         self.assertIn("--sequential-raw-build", invocation["argv"])
 
+    def test_transport_network_build_timeout_is_separate_from_route_timeout(self):
+        started = time.monotonic()
+        with (
+            patch.dict(os.environ, {"VIGO_FAKE_HANG_BUILD": "1"}),
+            self.assertRaisesRegex(
+                vigo_router.VigoCliTimeoutError,
+                "build-network timed out after 0.1 seconds",
+            ),
+        ):
+            vigo_router.TransportNetwork(
+                self.osm_pbf,
+                [self.gtfs],
+                cache_dir=self.root / "timeout-cache",
+                cli=self.cli,
+                route_timeout=2,
+                build_timeout=0.1,
+            )
+        self.assertLess(time.monotonic() - started, 3)
+
     def test_transport_network_reuses_content_addressed_build(self):
         first = vigo_router.TransportNetwork(
             self.osm_pbf,
@@ -745,6 +843,41 @@ class VigoRouterWrapperTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires a VIGO street store"):
             without_streets.isochrone("A", service_date="2026-07-15", raster_size=48)
 
+    def test_structured_analysis_timeout_is_bounded(self):
+        network = vigo_router.open_network(
+            self.store,
+            street_store=self.street_store,
+            cli=self.cli,
+            route_timeout=0.1,
+        )
+        for command, operation in (
+            (
+                "one-to-many",
+                lambda: network.route_many(
+                    "A",
+                    {"B": "B"},
+                    service_date="2026-07-15",
+                ),
+            ),
+            (
+                "isochrone",
+                lambda: network.isochrone(
+                    "A",
+                    service_date="2026-07-15",
+                    raster_size=48,
+                ),
+            ),
+        ):
+            with (
+                self.subTest(command=command),
+                patch.dict(os.environ, {"VIGO_FAKE_HANG_ANALYSIS": command}),
+                self.assertRaisesRegex(
+                    vigo_router.VigoCliTimeoutError,
+                    rf"{command} timed out after 0.1 seconds",
+                ),
+            ):
+                operation()
+
     def test_transport_network_validates_raw_inputs(self):
         with self.assertRaisesRegex(ValueError, "GTFS ZIP"):
             vigo_router.TransportNetwork(
@@ -771,6 +904,50 @@ class VigoRouterWrapperTest(unittest.TestCase):
 
         with self.assertRaises(FileNotFoundError):
             vigo_router.open_network(self.store, cli=self.root / "missing-vigo")
+
+    def test_every_cli_discovery_path_requires_exact_runtime_contract(self):
+        wrong_version = self.root / "vigo-wrong-version"
+        missing_command = self.root / "vigo-missing-command"
+        write_probe_cli(wrong_version, version="0.2.9")
+        write_probe_cli(missing_command, commands="vigo build-network")
+
+        with self.assertRaisesRegex(
+            vigo_router.VigoCliError,
+            "reports 0.2.9, expected 0.3.0",
+        ):
+            vigo_router.open_network(self.store, cli=wrong_version)
+        with self.assertRaisesRegex(vigo_router.VigoCliError, "route-ndjson"):
+            vigo_router.open_network(self.store, cli=missing_command)
+        with (
+            patch.dict(os.environ, {"VIGO_CLI": str(wrong_version)}),
+            self.assertRaisesRegex(
+                vigo_router.VigoCliError,
+                "reports 0.2.9, expected 0.3.0",
+            ),
+        ):
+            vigo_router.open_network(self.store)
+
+    def test_missing_plan_receipt_does_not_invent_sql_provenance(self):
+        from vigo_router import core
+
+        payload = core._blocked_payload("missing", "canonical plan absent")
+        diagnostics = payload["diagnostics"]
+        self.assertIsNone(diagnostics["algorithm"])
+        self.assertNotIn("storage", diagnostics)
+        self.assertNotIn("sqlite-only", json.dumps(payload))
+        self.assertEqual(diagnostics["failureCode"], "canonical_result_missing")
+
+    def test_timeout_values_must_be_positive_and_bounded(self):
+        for timeout in (0, -1, float("inf"), 86401):
+            with (
+                self.subTest(timeout=timeout),
+                self.assertRaises(ValueError),
+            ):
+                vigo_router.open_network(
+                    self.store,
+                    cli=self.cli,
+                    route_timeout=timeout,
+                )
 
     def test_route_requires_an_exact_service_date(self):
         network = vigo_router.open_network(self.store, cli=self.cli)
@@ -822,7 +999,15 @@ class VigoRouterWrapperTest(unittest.TestCase):
         app_bin.mkdir(parents=True)
         node = app_bin / "node"
         module = app_bin / "vigo.mjs"
-        node.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        node.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$2\" = \"--version\" ]; then echo 0.3.0; exit 0; fi\n"
+            "if [ \"$2\" = \"--help\" ]; then "
+            "echo 'vigo build-network; vigo route-ndjson; vigo one-to-many; vigo isochrone'; "
+            "exit 0; fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
         node.chmod(0o755)
         module.write_text("// bundled CLI fixture\n", encoding="utf-8")
         network = vigo_router.open_network(self.store, cli=self.root / "VIGO.app")

@@ -110,7 +110,11 @@ Runtime discovery uses this order:
 5. `/Applications/VIGO.app`, `~/Applications/VIGO.app`, then `vigo` on
    `PATH`.
 
-Use `vigo_router.resolve_cli()` to inspect the resolved command.
+Every candidate, including `cli=`, `VIGO_CLI`, `VIGO_APP`, and `PATH`, must
+report exactly VIGO 0.3.0 and expose the required build, resident-routing,
+one-to-many, and isochrone commands. An incompatible explicitly selected
+runtime fails immediately. Use `vigo_router.resolve_cli()` to inspect the
+resolved command or `vigo_router.probe_cli()` for its verified contract.
 
 ## Open existing stores
 
@@ -284,8 +288,8 @@ returns the contours. Valid raster sizes are 48, 64, 96, and 128.
 A returned `status == "blocked"` means VIGO ran the request but found no
 admissible path. It is not a transport or protocol failure. Invalid arguments
 raise `TypeError` or `ValueError`, missing files/runtimes raise
-`FileNotFoundError`, and canonical CLI, native, or response-contract failures
-raise `VigoCliError`.
+`FileNotFoundError`, bounded CLI operations raise `VigoCliTimeoutError`, and
+canonical CLI, native, or response-contract failures raise `VigoCliError`.
 
 Result properties return copies or immutable views. Use `to_dict()` or
 `to_json()` when persisting a receipt.
@@ -310,6 +314,20 @@ the same installed runtime, prepared stores, request corpus, and service date.
 Report process startup, preparation, native query, serialization, and Python
 materialization separately.
 
+## Execution deadlines
+
+Resident route responses, one-to-many queries, and isochrones have a 120-second
+deadline by default. A timeout terminates the child process, waits a bounded
+grace period, kills it if necessary, invalidates the resident session, and
+raises `VigoCliTimeoutError`. Set a network-specific deadline with
+`open_network(..., route_timeout=seconds)` or
+`TransportNetwork(..., route_timeout=seconds)`.
+
+Raw GTFS/OSM compilation has a separate 1,800-second deadline so a large build
+does not inherit an interactive query limit. Configure it with
+`TransportNetwork(..., build_timeout=seconds)`. Both values must be positive,
+finite, and no greater than 86,400 seconds.
+
 ## Console commands
 
 `vigo-router` and `python -m vigo_router` pass their arguments directly to the
@@ -333,6 +351,8 @@ install the checksum-pinned VIGO archive with `vigo-router-download`, and run
 the CLI version/help checks from outside the source tree without `PYTHONPATH`.
 The VIGO platform itself is built from the separate
 [VIGO source repository](https://github.com/hytangs/vigo#build-from-source).
+Main-branch and tagged builds also run this clean-wheel path on Apple-silicon
+macOS against the published runtime and a generated GTFS/OSM fixture.
 
 Continue with the [example notebooks](notebooks/) or the
 [canonical VIGO CLI contract](https://github.com/hytangs/vigo/blob/main/docs/vigo-cli.md).

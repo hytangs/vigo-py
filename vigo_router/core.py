@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import os
+import queue
 import shutil
 import sqlite3
 import subprocess
@@ -40,10 +41,17 @@ _BUILD_SCHEMA = "vigo.cli.build-network.v1"
 _ONE_TO_MANY_SCHEMA = "vigo.cli.one-to-many.v1"
 _ISOCHRONE_SCHEMA = "vigo.cli.isochrone.v1"
 _PACKAGE_VERSION = "0.3.0"
+_DEFAULT_ROUTE_TIMEOUT = 120.0
+_DEFAULT_BUILD_TIMEOUT = 1800.0
+_PROCESS_TERMINATION_GRACE = 1.0
 
 
 class VigoCliError(RuntimeError):
     """Raised when the canonical VIGO CLI cannot execute a routing request."""
+
+
+class VigoCliTimeoutError(VigoCliError, TimeoutError):
+    """Raised when a bounded VIGO CLI operation exceeds its deadline."""
 
 
 class _ResidentProtocolError(VigoCliError):
@@ -54,10 +62,21 @@ class _ResidentSessionBroken(RuntimeError):
     """Internal signal that a resident CLI process must be restarted."""
 
 
+class _ResidentSessionTimeout(TimeoutError):
+    """Internal signal that a resident CLI response exceeded its deadline."""
+
+
 class _RoutingSession:
     """One prepared ``route-ndjson`` child process."""
 
-    __slots__ = ("_process", "_stderr")
+    __slots__ = (
+        "_close_lock",
+        "_closed",
+        "_process",
+        "_reader",
+        "_responses",
+        "_stderr",
+    )
 
     def __init__(
         self,
@@ -88,8 +107,36 @@ class _RoutingSession:
             raise
         self._stderr = stderr
         self._process = process
+        self._responses: queue.Queue[bytes | BaseException] = queue.Queue()
+        self._close_lock = threading.Lock()
+        self._closed = False
+        self._reader = threading.Thread(
+            target=self._read_responses,
+            name="vigo-route-ndjson-reader",
+            daemon=True,
+        )
+        self._reader.start()
 
-    def exchange(self, requests: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    def _read_responses(self) -> None:
+        process = self._process
+        if process.stdout is None:
+            self._responses.put(RuntimeError("VIGO resident stdout is unavailable"))
+            return
+        try:
+            while True:
+                line = process.stdout.readline()
+                self._responses.put(line)
+                if not line:
+                    return
+        except (OSError, ValueError) as error:
+            self._responses.put(error)
+
+    def exchange(
+        self,
+        requests: Sequence[Mapping[str, Any]],
+        *,
+        timeout: float,
+    ) -> list[dict[str, Any]]:
         process = self._process
         if process.stdin is None or process.stdout is None:
             raise _ResidentSessionBroken(self._failure_message())
@@ -105,7 +152,12 @@ class _RoutingSession:
                     + b"\n"
                 )
                 process.stdin.flush()
-                line = process.stdout.readline()
+                try:
+                    line = self._responses.get(timeout=timeout)
+                except queue.Empty as error:
+                    raise _ResidentSessionTimeout from error
+                if isinstance(line, BaseException):
+                    raise _ResidentSessionBroken(self._failure_message()) from line
                 if not line:
                     raise _ResidentSessionBroken(self._failure_message())
                 try:
@@ -119,6 +171,8 @@ class _RoutingSession:
                         "VIGO resident session returned a non-object row"
                     )
                 responses.append(response)
+        except _ResidentSessionTimeout:
+            raise
         except (BrokenPipeError, OSError, ValueError) as error:
             raise _ResidentSessionBroken(self._failure_message()) from error
         return responses
@@ -132,32 +186,42 @@ class _RoutingSession:
             detail = ""
         return detail or f"VIGO resident session exited {self._process.poll()}"
 
-    def close(self) -> None:
-        process = self._process
-        if process.stdin is not None and not process.stdin.closed:
-            try:
-                process.stdin.close()
-            except (BrokenPipeError, OSError):
-                pass
-        try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            try:
-                process.terminate()
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
+    def close(self, *, terminate: bool = False) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            process = self._process
+            if process.stdin is not None and not process.stdin.closed:
                 try:
-                    process.kill()
+                    process.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
+            if terminate and process.poll() is None:
+                try:
+                    process.terminate()
                 except ProcessLookupError:
                     pass
-                process.wait()
-        if process.stdout is not None and not process.stdout.closed:
-            process.stdout.close()
-        if not self._stderr.closed:
-            self._stderr.close()
+            try:
+                process.wait(timeout=_PROCESS_TERMINATION_GRACE)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=_PROCESS_TERMINATION_GRACE)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
+            self._reader.join(timeout=_PROCESS_TERMINATION_GRACE)
+            if process.stdout is not None and not process.stdout.closed:
+                process.stdout.close()
+            if not self._stderr.closed:
+                self._stderr.close()
 
 
 class _RoutingSessionPool:
@@ -188,7 +252,15 @@ class _RoutingSessionPool:
                 assert self._session is not None
                 session = self._session
             try:
-                return session.exchange(requests), reused
+                return session.exchange(requests, timeout=network.route_timeout), reused
+            except _ResidentSessionTimeout as error:
+                with self._lock:
+                    if self._session is session:
+                        self._close_unlocked(terminate=True)
+                raise VigoCliTimeoutError(
+                    "VIGO route-ndjson timed out after "
+                    f"{network.route_timeout:g} seconds"
+                ) from error
             except _ResidentSessionBroken:
                 with self._lock:
                     if self._session is session or self._key != key:
@@ -196,7 +268,18 @@ class _RoutingSessionPool:
                     assert self._session is not None
                     session = self._session
                 try:
-                    return session.exchange(requests), False
+                    return (
+                        session.exchange(requests, timeout=network.route_timeout),
+                        False,
+                    )
+                except _ResidentSessionTimeout as error:
+                    with self._lock:
+                        if self._session is session:
+                            self._close_unlocked(terminate=True)
+                    raise VigoCliTimeoutError(
+                        "VIGO route-ndjson timed out after "
+                        f"{network.route_timeout:g} seconds"
+                    ) from error
                 except _ResidentSessionBroken as error:
                     with self._lock:
                         if self._session is session:
@@ -209,9 +292,12 @@ class _RoutingSessionPool:
         with self._lock:
             self._close_unlocked()
 
-    def _close_unlocked(self) -> None:
+    def _close_unlocked(self, *, terminate: bool = False) -> None:
         if self._session is not None:
-            self._session.close()
+            if terminate:
+                self._session.close(terminate=True)
+            else:
+                self._session.close()
         self._session = None
         self._key = None
 
@@ -243,6 +329,7 @@ class RoutingNetwork:
     street_store: Path | None
     command: tuple[str, ...]
     stats: Mapping[str, int | str] = field(repr=False)
+    route_timeout: float = _DEFAULT_ROUTE_TIMEOUT
     engine: str = "vigo-native-js-cli"
     _sessions: _RoutingSessionPool = field(
         default_factory=_RoutingSessionPool,
@@ -698,7 +785,11 @@ class TransportNetwork:
         rebuild: bool = False,
         progress: bool = False,
         sequential_raw_build: bool = False,
+        route_timeout: float = _DEFAULT_ROUTE_TIMEOUT,
+        build_timeout: float = _DEFAULT_BUILD_TIMEOUT,
     ) -> None:
+        route_deadline = _positive_timeout(route_timeout, "route_timeout")
+        build_deadline = _positive_timeout(build_timeout, "build_timeout")
         gtfs_paths = _raw_gtfs_paths(gtfs)
         osm_path = _raw_osm_path(osm_pbf)
         command = _resolve_cli(cli)
@@ -716,6 +807,7 @@ class TransportNetwork:
             rebuild=rebuild,
             progress=progress,
             sequential_raw_build=sequential_raw_build,
+            build_timeout=build_deadline,
         )
         store_path = _sqlite_path(summary["routingStore"]["path"], "routing store")
         street_path = _sqlite_path(summary["streetStore"]["path"], "street store")
@@ -726,6 +818,7 @@ class TransportNetwork:
             street_store=street_path,
             command=command,
             stats=MappingProxyType(_routing_store_stats(store_path)),
+            route_timeout=route_deadline,
         )
         self._network = network
         self._osm_pbf = osm_path
@@ -905,6 +998,7 @@ def _compile_transport_network(
     rebuild: bool,
     progress: bool,
     sequential_raw_build: bool,
+    build_timeout: float,
 ) -> dict[str, Any]:
     manifest_path = network_directory / "network.json"
     if manifest_path.is_file() and not rebuild:
@@ -937,13 +1031,19 @@ def _compile_transport_network(
         arguments.append("--force")
     if sequential_raw_build:
         arguments.append("--sequential-raw-build")
-    completed = subprocess.run(
-        arguments,
-        stdout=subprocess.PIPE,
-        stderr=None if progress else subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            arguments,
+            stdout=subprocess.PIPE,
+            stderr=None if progress else subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=build_timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise VigoCliTimeoutError(
+            f"VIGO build-network timed out after {build_timeout:g} seconds"
+        ) from error
     if completed.returncode != 0:
         message = (
             completed.stderr.strip()
@@ -1286,6 +1386,7 @@ def open_network(
     *,
     street_store: str | os.PathLike[str] | None = None,
     cli: str | os.PathLike[str] | None = None,
+    route_timeout: float = _DEFAULT_ROUTE_TIMEOUT,
 ) -> RoutingNetwork:
     """Validate VIGO SQLite stores and resolve the canonical standalone CLI."""
 
@@ -1302,6 +1403,7 @@ def open_network(
         street_store=street_path,
         command=_resolve_cli(cli),
         stats=MappingProxyType(stats),
+        route_timeout=_positive_timeout(route_timeout, "route_timeout"),
     )
 
 
@@ -1612,12 +1714,18 @@ def _run_structured_command(
         ]
         if network.street_store is not None:
             invocation.append(f"--street-store={network.street_store}")
-        completed = subprocess.run(
-            invocation,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                invocation,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=network.route_timeout,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise VigoCliTimeoutError(
+                f"VIGO {command} timed out after {network.route_timeout:g} seconds"
+            ) from error
     python_wall_ms = (time_module.perf_counter() - started) * 1000
     if completed.returncode != 0:
         message = (
@@ -1689,6 +1797,13 @@ def _positive_number(value: Any, label: str) -> float:
     if not math.isfinite(number) or number <= 0:
         raise ValueError(message)
     return number
+
+
+def _positive_timeout(value: Any, label: str) -> float:
+    timeout = _positive_number(value, label)
+    if timeout > 24 * 60 * 60:
+        raise ValueError(f"{label} must not exceed 86400 seconds")
+    return timeout
 
 
 def _nonnegative_integer(value: Any, label: str) -> int:
@@ -1962,16 +2077,24 @@ def _resolve_cli(explicit: str | os.PathLike[str] | None) -> tuple[str, ...]:
     if explicit is not None:
         command = _candidate_command(Path(explicit).expanduser())
         if command:
-            return command
+            return _require_compatible_cli(command, "explicit cli")
         raise FileNotFoundError(
             f"VIGO CLI or app runtime not found: {Path(explicit).expanduser()}"
         )
 
     candidates: list[Path] = []
     if os.environ.get("VIGO_CLI"):
-        candidates.append(Path(os.environ["VIGO_CLI"]).expanduser())
+        candidate = Path(os.environ["VIGO_CLI"]).expanduser()
+        command = _candidate_command(candidate)
+        if command is None:
+            raise FileNotFoundError(f"VIGO_CLI does not resolve to a CLI: {candidate}")
+        return _require_compatible_cli(command, "VIGO_CLI")
     if os.environ.get("VIGO_APP"):
-        candidates.append(Path(os.environ["VIGO_APP"]).expanduser())
+        candidate = Path(os.environ["VIGO_APP"]).expanduser()
+        command = _candidate_command(candidate)
+        if command is None:
+            raise FileNotFoundError(f"VIGO_APP does not resolve to an app: {candidate}")
+        return _require_compatible_cli(command, "VIGO_APP")
     package_root = Path(__file__).resolve().parents[1]
     try:
         from .runtime import installed_runtime_candidates
@@ -1992,10 +2115,19 @@ def _resolve_cli(explicit: str | os.PathLike[str] | None) -> tuple[str, ...]:
     installed = shutil.which("vigo")
     if installed:
         candidates.append(Path(installed))
+    incompatible: list[str] = []
     for candidate in candidates:
         command = _candidate_command(candidate)
         if command:
-            return command
+            try:
+                return _require_compatible_cli(command, str(candidate))
+            except VigoCliError as error:
+                incompatible.append(str(error))
+    if incompatible:
+        raise VigoCliError(
+            f"No VIGO {_PACKAGE_VERSION} runtime passed the binding contract. "
+            + " | ".join(incompatible)
+        )
     raise FileNotFoundError(
         "VIGO CLI not found. Install/extract VIGO.app, put the 'vigo' launcher on PATH, "
         "or pass cli=/path/to/vigo (VIGO_APP and VIGO_CLI are also supported)."
@@ -2014,6 +2146,18 @@ def _candidate_command(candidate: Path) -> tuple[str, ...] | None:
     if candidate.is_file() and os.access(candidate, os.X_OK):
         return (str(candidate),)
     return None
+
+
+def _require_compatible_cli(
+    command: tuple[str, ...],
+    source: str,
+) -> tuple[str, ...]:
+    from .runtime import probe_cli
+
+    try:
+        return probe_cli(command, expected_version=_PACKAGE_VERSION).command
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as error:
+        raise VigoCliError(f"Incompatible VIGO runtime from {source}: {error}") from error
 
 
 def _clock(
@@ -2093,8 +2237,7 @@ def _blocked_payload(request_id: str, reason: Any) -> dict[str, Any]:
         "destination": {},
         "legs": [],
         "diagnostics": {
-            "algorithm": "connection_scan_sqlite",
-            "storage": "sqlite-only",
+            "algorithm": None,
             "methodState": "failed",
             "failureCode": "canonical_result_missing",
             "failureCategory": "internal_error",

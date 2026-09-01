@@ -13,7 +13,9 @@ import subprocess
 import tempfile
 import urllib.request
 import zipfile
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -49,6 +51,15 @@ class RuntimeInstall:
         payload["root"] = str(self.root)
         payload["launcher"] = str(self.launcher)
         return payload
+
+
+@dataclass(frozen=True, slots=True)
+class CliProbe:
+    """Verified identity and command surface for one VIGO CLI."""
+
+    command: tuple[str, ...]
+    version: str
+    required_commands: tuple[str, ...]
 
 
 def default_runtime_directory(version: str = _PACKAGE_VERSION) -> Path:
@@ -259,30 +270,85 @@ def _safe_extract(archive: Path, destination: Path) -> None:
                 output.chmod(permissions)
 
 
-def _require_runtime_version(launcher: Path, version: str) -> None:
-    if not launcher.is_file() or not os.access(launcher, os.X_OK):
-        raise FileNotFoundError(
-            f"VIGO runtime launcher is missing or not executable: {launcher}"
-        )
-    completed = subprocess.run(
-        [str(launcher), "--version"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
+def probe_cli(
+    command: str | os.PathLike[str] | Sequence[str | os.PathLike[str]],
+    *,
+    expected_version: str = _PACKAGE_VERSION,
+    timeout: float = 30,
+) -> CliProbe:
+    """Require an exact VIGO version and the complete Python-facing CLI surface.
+
+    Probe results are cached against the resolved executable/module file
+    identities, so replacing a command at the same path invalidates the cache.
+    """
+
+    parts = (
+        (os.fspath(command),)
+        if isinstance(command, (str, os.PathLike))
+        else tuple(os.fspath(part) for part in command)
     )
-    reported = completed.stdout.strip()
-    if completed.returncode != 0 or reported != version:
+    if not parts:
+        raise ValueError("VIGO CLI command cannot be empty")
+    resolved: list[str] = []
+    identity: list[tuple[int, int, int, int]] = []
+    for index, part in enumerate(parts):
+        path = Path(part).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"VIGO CLI command file is missing: {path}")
+        if index == 0 and not os.access(path, os.X_OK):
+            raise FileNotFoundError(f"VIGO CLI launcher is not executable: {path}")
+        details = path.stat()
+        resolved.append(str(path))
+        identity.append(
+            (details.st_dev, details.st_ino, details.st_size, details.st_mtime_ns)
+        )
+    if timeout <= 0:
+        raise ValueError("VIGO CLI probe timeout must be positive")
+    return _probe_cli_cached(
+        tuple(resolved),
+        tuple(identity),
+        str(expected_version),
+        float(timeout),
+    )
+
+
+@lru_cache(maxsize=32)
+def _probe_cli_cached(
+    command: tuple[str, ...],
+    _identity: tuple[tuple[int, int, int, int], ...],
+    expected_version: str,
+    timeout: float,
+) -> CliProbe:
+    try:
+        completed = subprocess.run(
+            [*command, "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
         raise RuntimeError(
-            f"VIGO runtime reports {reported or 'no version'}, expected {version}"
+            f"VIGO runtime version probe timed out after {timeout:g} seconds"
+        ) from error
+    reported = completed.stdout.strip()
+    if completed.returncode != 0 or reported != expected_version:
+        raise RuntimeError(
+            "VIGO runtime reports "
+            f"{reported or 'no version'}, expected {expected_version}"
         )
-    help_result = subprocess.run(
-        [str(launcher), "--help"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
+    try:
+        help_result = subprocess.run(
+            [*command, "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"VIGO runtime help probe timed out after {timeout:g} seconds"
+        ) from error
     missing_commands = [
         marker for marker in _REQUIRED_HELP_MARKERS if marker not in help_result.stdout
     ]
@@ -291,6 +357,14 @@ def _require_runtime_version(launcher: Path, version: str) -> None:
             "VIGO runtime is missing required Python binding commands: "
             f"{', '.join(missing_commands) or 'help unavailable'}"
         )
+    return CliProbe(command, reported, _REQUIRED_HELP_MARKERS)
+
+
+def _require_runtime_version(launcher: Path, version: str) -> None:
+    probe_cli(
+        (str(launcher),),
+        expected_version=version,
+    )
 
 
 def main(arguments: list[str] | None = None) -> int:
