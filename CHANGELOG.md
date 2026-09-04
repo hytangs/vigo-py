@@ -1,19 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
-- Added bounded resident-query, analytical-query, and raw-build deadlines with
-  terminate/grace/kill recovery and a stable `VigoCliTimeoutError`.
-- Required every CLI discovery path to pass one cached exact-version and
-  required-command probe.
-- Removed obsolete SQL-router claims from missing-plan failure receipts.
-- Added Apple-silicon clean-wheel integration coverage against the published
-  checksum-pinned VIGO runtime.
+VIGO 0.3 unifies the product around one model:
 
-## 0.3.0 - 2026-08-31
+```text
+City -> Scenario -> Route | Matrix | Reach -> Result
+```
 
-- Established VIGO for Python as a standalone repository.
-- Added a checksum-pinned installer for the verified VIGO 0.3.0 runtime.
-- Preserved one canonical routing implementation through the VIGO CLI and
-  native Rust kernel.
-- Added clean-install, runtime-security, API-contract, and documentation checks.
+- Renamed the Python package to `vigo`.
+- Replaced store-pair objects with one complete City.
+- Added immutable Scenario objects tied to one City revision.
+- Replaced separate batch and one-origin analysis functions with Route and Matrix.
+- Renamed network range analysis to Reach.
+- Added one Result shape, local comparison, export, and background jobs.
+- Removed the Python pass-through command and runtime installer. VIGO Studio and the VIGO command line are installed independently.

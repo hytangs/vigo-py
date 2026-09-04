@@ -1,41 +1,25 @@
-# Contributing to VIGO for Python
+# Contributing to VIGO SDK
 
-VIGO for Python is a thin binding around the canonical VIGO runtime. Changes
-must preserve that boundary: routing, timetable compilation, and street-network
-algorithms belong in the [VIGO native runtime](https://github.com/hytangs/vigo), not in
-this package.
+VIGO SDK is the Python interface to VIGO. It must preserve the same City, Scenario, Route, Matrix, Reach, and Result model used by VIGO Studio and the command line.
 
-## Development setup
+## Before changing code
 
-Use Python 3.10 or newer:
+- Put computation changes in the VIGO engine repository.
+- Keep this repository focused on Python objects, process communication, validation, and examples.
+- Do not add a second GTFS parser or routing implementation.
+- Do not expose runtime preparation as a user task.
+- Do not introduce a new public noun when an option on Route, Matrix, or Reach is sufficient.
 
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -e .
-```
-
-Run the complete source-level checks before opening a change:
+## Checks
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -t . -p 'test_vigo_router*.py'
-python scripts/check-notebooks.py
-python scripts/check-public-release.py
-python -m pip wheel --no-deps --wheel-dir dist .
+python -m pytest -q
+python -m ruff check vigo tests
+python -m pip wheel . --no-deps --wheel-dir dist
 ```
 
-Tests must not require private GTFS feeds, private OSM extracts, developer
-paths, or generated artifacts. Use the focused fixtures already in `tests/`.
+Add focused tests for public behavior. Use a real VIGO City for end-to-end checks when the change crosses the Python and engine boundary.
 
-## Runtime changes
+## Pull requests
 
-The default runtime URL and SHA-256 digest are versioned together in
-`vigo_router/runtime.py`. Change them only for a verified VIGO release artifact,
-and test installation from a clean virtual environment with no source-tree
-imports.
-
-## Reporting results
-
-Keep Python wrapper time, VIGO preparation time, native routing time, and output
-serialization time separate. A passing binding test is not a general claim
-about GTFS correctness or operational suitability.
+Explain the user-visible behavior, affected Query family, tests run, and known limits. Keep unrelated changes out of the patch.

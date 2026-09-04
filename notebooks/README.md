@@ -1,12 +1,10 @@
-# Example notebooks
+# VIGO Python notebooks
 
-These notebooks demonstrate the public `vigo_router` API without stored output
-or developer-specific paths:
+These notebooks use the public `vigo` package and contain no stored output.
 
-1. `01_build_network.ipynb` builds a VIGO network from GTFS and OSM inputs.
-2. `02_route_and_batch.ipynb` runs one route and a batch.
-3. `03_one_to_many.ipynb` produces a travel-time field.
-4. `04_isochrone.ipynb` generates an accessibility surface.
+1. `01_build_city.ipynb` builds one complete City.
+2. `02_route.ipynb` runs Route and batch Query objects.
+3. `03_matrix.ipynb` runs Matrix queries with one or many origins.
+4. `04_reach.ipynb` exports a Reach Result.
 
-Set the input paths and service date for your own data before executing them.
-Run `python scripts/check-notebooks.py` after editing an example.
+Set paths and service dates for your own data before running them.

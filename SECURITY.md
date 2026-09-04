@@ -1,25 +1,13 @@
 # Security policy
 
-VIGO for Python is experimental pre-release software. Do not use it as the sole
-basis for safety-critical, operational, or passenger-information decisions.
+VIGO 0.3 is pre-release software. Do not use it for safety-critical, operational, or passenger-information systems without independent validation.
 
-## Supported version
+## Report a vulnerability
 
-Security fixes currently target the latest tagged `0.3.x` source. Older
-snapshots may not receive fixes.
+Please report vulnerabilities privately through the repository security advisory page. Include the affected version, platform, a minimal reproduction, and the impact. Do not include credentials or private transport data.
 
-## Reporting a vulnerability
+## Supported surface
 
-Use GitHub's private vulnerability-reporting feature for this repository. Do
-not publish credentials, private transit data, exploit details, or sensitive
-filesystem paths in a public issue.
+Security support covers the current `vigo` Python package and its communication with a local VIGO 0.3 runtime. VIGO does not expose a public network service through this package.
 
-Include the package version, Python version, operating system, installation
-method, and the smallest non-sensitive reproduction you can provide.
-
-## Runtime downloads
-
-The bundled installer accepts only HTTPS download URLs and verifies the entire
-runtime archive against a SHA-256 digest before extraction. It rejects path
-traversal and symbolic-link entries and will not overwrite an unrelated
-populated directory.
+The SDK accepts local City paths, local source paths during Build, and a caller-selected VIGO command. Applications remain responsible for controlling which files and commands untrusted users may select.
