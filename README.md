@@ -101,7 +101,7 @@ requests = [
 results = city.run(requests)
 ```
 
-`Context.run(query)` is the execution primitive. `city.route(...)`, `city.matrix(...)`, and `city.reach(...)` are convenience constructors with exactly the same behavior.
+`City.run(query)` and `Scenario.run(query)` are the execution primitives. `city.route(...)`, `city.matrix(...)`, and `city.reach(...)` are convenience constructors with exactly the same behavior.
 
 The 0.3.0 Route objective is explicit and singular: earliest arrival, then fewer boardings, then less walking, then a stable final order.
 
@@ -227,6 +227,7 @@ result = job.wait()
 ```bash
 python -m pytest -q
 python -m ruff check vigo tests
+python -m mypy vigo
 ```
 
 VIGO Python is licensed under the [Apache License 2.0](LICENSE).

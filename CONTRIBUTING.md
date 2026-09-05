@@ -15,6 +15,7 @@ VIGO SDK is the Python interface to VIGO. It must preserve the same City, Scenar
 ```bash
 python -m pytest -q
 python -m ruff check vigo tests
+python -m mypy vigo
 python -m pip wheel . --no-deps --wheel-dir dist
 ```
 

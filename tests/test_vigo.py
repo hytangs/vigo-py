@@ -12,7 +12,7 @@ from pathlib import Path
 
 import vigo
 
-FAKE_VIGO = r'''from __future__ import annotations
+FAKE_VIGO = r"""from __future__ import annotations
 import json
 import pathlib
 import sys
@@ -135,7 +135,7 @@ elif command == "reach":
     }))
 else:
     raise SystemExit(2)
-'''
+"""
 
 
 class VigoPythonTest(unittest.TestCase):
@@ -151,14 +151,19 @@ class VigoPythonTest(unittest.TestCase):
         (self.city_path / "routing" / "project.sqlite").touch()
         (self.city_path / "osm" / "street-index.sqlite").touch()
         (self.city_path / "network.json").write_text(
-            json.dumps({
-                "schemaVersion": "vigo.city.v1",
-                "cityFormatVersion": 1,
-                "name": "city",
-                "revisionId": "20260904T120000-001Z",
-                "builtAt": "2026-09-04T12:00:00.000Z",
-                "sources": {"gtfs": [{"name": "feed.zip"}], "osm": {"name": "region.osm.pbf"}},
-            }),
+            json.dumps(
+                {
+                    "schemaVersion": "vigo.city.v1",
+                    "cityFormatVersion": 1,
+                    "name": "city",
+                    "revisionId": "20260904T120000-001Z",
+                    "builtAt": "2026-09-04T12:00:00.000Z",
+                    "sources": {
+                        "gtfs": [{"name": "feed.zip"}],
+                        "osm": {"name": "region.osm.pbf"},
+                    },
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -199,13 +204,15 @@ class VigoPythonTest(unittest.TestCase):
         with vigo.open(self.city_path, runtime=self.command) as city:
             proposal = city.scenario(
                 "More service",
-                services=[{
-                    "name": "Crosstown",
-                    "stops": [
-                        {"coordinate": [0, 0]},
-                        {"coordinate": [1, 1]},
-                    ],
-                }],
+                services=[
+                    {
+                        "name": "Crosstown",
+                        "stops": [
+                            {"coordinate": [0, 0]},
+                            {"coordinate": [1, 1]},
+                        ],
+                    }
+                ],
             )
             result = proposal.reach(
                 [0, 0],
@@ -269,11 +276,16 @@ class VigoPythonTest(unittest.TestCase):
             stops[0]["coordinate"][0] = 40
             with self.assertRaises(TypeError):
                 scenario.services[0]["stops"][0]["coordinate"][0] = 50
-            traffic = city.scenario("Traffic", traffic={"observations": [{"delayFactor": 2}]})
+            traffic = city.scenario(
+                "Traffic", traffic={"observations": [{"delayFactor": 2}]}
+            )
             with self.assertRaises(TypeError):
                 traffic.traffic["observations"][0]["delayFactor"] = 3
             result = scenario.reach([0, 0], service_date="2026-09-04", raster_size=48)
-            self.assertEqual(result.query["scenario"]["services"][0]["stops"][0]["coordinate"], [0, 0])
+            self.assertEqual(
+                result.query["scenario"]["services"][0]["stops"][0]["coordinate"],
+                [0, 0],
+            )
 
     def test_route_stream_recovers_and_closes_all_pipes(self) -> None:
         city = vigo.open(self.city_path, runtime=self.command)
@@ -306,8 +318,10 @@ class VigoPythonTest(unittest.TestCase):
     def test_date_pool_reuses_recent_dates_and_closes_evicted_processes(self) -> None:
         with vigo.open(self.city_path, runtime=self.command) as city:
             city._stream_limit = 2
+
             def route(date):
                 return city.route("A", "B", depart_at="08:00", service_date=date)
+
             route("2026-09-04")
             first = city._streams["2026-09-04"]
             route("2026-09-05")
@@ -325,25 +339,41 @@ class VigoPythonTest(unittest.TestCase):
                 self.assertTrue(stream._process.stderr.closed)
 
     def test_busy_date_pool_times_out_without_evicting_active_query(self) -> None:
-        with vigo.open(self.city_path, runtime=self.command) as city, ThreadPoolExecutor(max_workers=1) as executor:
+        with (
+            vigo.open(self.city_path, runtime=self.command) as city,
+            ThreadPoolExecutor(max_workers=1) as executor,
+        ):
             city._stream_limit = 1
             city.timeout = 0.1
             with city._stream("2026-09-04") as active:
-                future = executor.submit(city.route, "A", "B", depart_at="08:00", service_date="2026-09-05")
-                with self.assertRaisesRegex(vigo.VigoTimeoutError, "available VIGO Route process"):
+                future = executor.submit(
+                    city.route, "A", "B", depart_at="08:00", service_date="2026-09-05"
+                )
+                with self.assertRaisesRegex(
+                    vigo.VigoTimeoutError, "available VIGO Route process"
+                ):
                     future.result(timeout=5)
                 self.assertTrue(active.alive)
                 self.assertEqual(list(city._streams), ["2026-09-04"])
             city.timeout = 5
-            self.assertEqual(city.route("A", "B", depart_at="08:00", service_date="2026-09-05").status, "ready")
+            self.assertEqual(
+                city.route(
+                    "A", "B", depart_at="08:00", service_date="2026-09-05"
+                ).status,
+                "ready",
+            )
             self.assertFalse(active.alive)
 
-    def test_city_close_waits_for_active_stream_and_query_failure_releases_it(self) -> None:
+    def test_city_close_waits_for_active_stream_and_query_failure_releases_it(
+        self,
+    ) -> None:
         city = vigo.open(self.city_path, runtime=self.command)
         entered = threading.Event()
+
         def close():
             entered.set()
             city.close()
+
         with ThreadPoolExecutor(max_workers=1) as executor:
             with city._stream("2026-09-04") as active:
                 future = executor.submit(close)
@@ -352,16 +382,24 @@ class VigoPythonTest(unittest.TestCase):
                 self.assertTrue(active.alive)
             future.result(timeout=5)
             self.assertFalse(active.alive)
-        with self.assertRaisesRegex(RuntimeError, "Query failed"), city._stream("2026-09-05"):
+        with (
+            self.assertRaisesRegex(RuntimeError, "Query failed"),
+            city._stream("2026-09-05"),
+        ):
             raise RuntimeError("Query failed")
         self.assertFalse(city._stream_users)
         city.close()
 
     def test_different_dates_can_query_while_another_stream_is_busy(self) -> None:
-        with vigo.open(self.city_path, runtime=self.command) as city, ThreadPoolExecutor(max_workers=1) as executor:
+        with (
+            vigo.open(self.city_path, runtime=self.command) as city,
+            ThreadPoolExecutor(max_workers=1) as executor,
+        ):
             city._stream_limit = 2
             with city._stream("2026-09-04") as active:
-                future = executor.submit(city.route, "A", "B", depart_at="08:00", service_date="2026-09-05")
+                future = executor.submit(
+                    city.route, "A", "B", depart_at="08:00", service_date="2026-09-05"
+                )
                 self.assertEqual(future.result(timeout=5).status, "ready")
                 self.assertTrue(active.alive)
                 self.assertEqual(len(city._streams), 2)
@@ -374,20 +412,39 @@ class VigoPythonTest(unittest.TestCase):
 
     def test_comparison_preserves_unreachable_values_and_grid_identity(self) -> None:
         def result(kind, **payload):
-            return vigo.Result(kind, {"resultSchemaVersion": 1, "status": "ready", **payload}, "city")
+            return vigo.Result(
+                kind, {"resultSchemaVersion": 1, "status": "ready", **payload}, "city"
+            )
 
         def reach(values, bounds=(0, 0, 1, 1), width=2, height=2):
-            return result("reach", surface={"values": values, "bounds": list(bounds), "width": width, "height": height})
+            return result(
+                "reach",
+                surface={
+                    "values": values,
+                    "bounds": list(bounds),
+                    "width": width,
+                    "height": height,
+                },
+            )
 
-        difference = vigo.compare(reach([None, 10, 0, None]), reach([20, None, 0, None])).value
+        difference = vigo.compare(
+            reach([None, 10, 0, None]), reach([20, None, 0, None])
+        ).value
         self.assertEqual(difference["comparableCells"], 1)
         self.assertEqual(difference["meanChangeMinutes"], 0)
         self.assertEqual(difference["newlyReachableCells"], 1)
         self.assertEqual(difference["noLongerReachableCells"], 1)
-        for other in (reach([1, 2, 3, 4], bounds=(1, 1, 2, 2)), reach([1, 2, 3, 4], width=1, height=4)):
+        for other in (
+            reach([1, 2, 3, 4], bounds=(1, 1, 2, 2)),
+            reach([1, 2, 3, 4], width=1, height=4),
+        ):
             with self.assertRaisesRegex(ValueError, "same grid"):
                 vigo.compare(reach([1, 2, 3, 4]), other)
-        before = result("route", status="blocked", result={"durationMinutes": None, "transfers": None})
+        before = result(
+            "route",
+            status="blocked",
+            result={"durationMinutes": None, "transfers": None},
+        )
         after = result("route", result={"durationMinutes": 10, "transfers": 1})
         self.assertIsNone(vigo.compare(before, after).value["transferChange"])
         self.assertIsNone(vigo.compare(before, after).value["durationChangeMinutes"])
@@ -405,7 +462,10 @@ class VigoPythonTest(unittest.TestCase):
         self.assertEqual(runtime.command, (str(executable), str(program)))
         environment = _command_environment(runtime.command)
         self.assertEqual(environment["ELECTRON_RUN_AS_NODE"], "1")
-        self.assertEqual(Path(environment["VIGO_NATIVE_ROUTING_KERNEL"]), program.parent.parent / "server" / "vigo-routing-kernel.node")
+        self.assertEqual(
+            Path(environment["VIGO_NATIVE_ROUTING_KERNEL"]),
+            program.parent.parent / "server" / "vigo-routing-kernel.node",
+        )
 
 
 if __name__ == "__main__":

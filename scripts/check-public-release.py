@@ -22,7 +22,11 @@ def files() -> list[Path]:
         check=True,
         capture_output=True,
     )
-    return [ROOT / item.decode() for item in completed.stdout.split(b"\0") if item and (ROOT / item.decode()).is_file()]
+    return [
+        ROOT / item.decode()
+        for item in completed.stdout.split(b"\0")
+        if item and (ROOT / item.decode()).is_file()
+    ]
 
 
 def main() -> None:
@@ -32,7 +36,11 @@ def main() -> None:
         relative = path.relative_to(ROOT)
         if any(part in {"dist", "build", ".venv"} for part in relative.parts):
             problems.append(f"generated output is tracked: {relative}")
-        if path.suffix.lower() not in TEXT_SUFFIXES or path.name == "LICENSE" or path == Path(__file__):
+        if (
+            path.suffix.lower() not in TEXT_SUFFIXES
+            or path.name == "LICENSE"
+            or path == Path(__file__)
+        ):
             continue
         text = path.read_text(encoding="utf-8")
         for pattern in PRIVATE_PATTERNS:
@@ -46,7 +54,11 @@ def main() -> None:
         problems.append("runtime version differs")
     if problems:
         raise SystemExit("\n".join(problems))
-    print(json.dumps({"status": "passed", "files": len(public), "version": "0.3.0"}, indent=2))
+    print(
+        json.dumps(
+            {"status": "passed", "files": len(public), "version": "0.3.0"}, indent=2
+        )
+    )
 
 
 if __name__ == "__main__":

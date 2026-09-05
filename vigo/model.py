@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, TypeVar
+from typing import Any, TypeGuard, TypeVar, overload
 
 from .runtime import (
     API_VERSION,
@@ -39,19 +39,32 @@ Point = str | Sequence[float] | Mapping[str, Any]
 PointSet = Point | Mapping[str, Point] | Sequence[Point]
 _CityT = TypeVar("_CityT", bound="City")
 
-_SERVICE_DAYS = {0: "weekday", 1: "weekday", 2: "weekday", 3: "weekday", 4: "weekday", 5: "saturday", 6: "sunday"}
+_SERVICE_DAYS = {
+    0: "weekday",
+    1: "weekday",
+    2: "weekday",
+    3: "weekday",
+    4: "weekday",
+    5: "saturday",
+    6: "sunday",
+}
+
 
 def _job_worker_count() -> int:
     cpu_limit = max(1, min(4, (os.cpu_count() or 2) // 2))
     try:
-        physical_bytes = int(os.sysconf("SC_PHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
+        physical_bytes = int(os.sysconf("SC_PHYS_PAGES")) * int(
+            os.sysconf("SC_PAGE_SIZE")
+        )
     except (AttributeError, OSError, TypeError, ValueError):
         return 1
     memory_limit = max(1, min(4, physical_bytes // (6 * 1024**3)))
     return min(cpu_limit, memory_limit)
 
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=_job_worker_count(), thread_name_prefix="vigo")
+_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_job_worker_count(), thread_name_prefix="vigo"
+)
 
 
 class InvalidQuery(VigoError, ValueError):
@@ -150,7 +163,9 @@ def _date_text(value: str | dt.date | None) -> str | None:
         raise InvalidQuery("service_date must be YYYY-MM-DD") from error
 
 
-def _clock(value: str | dt.time | dt.datetime | None, service_date: str | dt.date | None) -> tuple[str, str]:
+def _clock(
+    value: str | dt.time | dt.datetime | None, service_date: str | dt.date | None
+) -> tuple[str, str]:
     selected_date = _date_text(service_date)
     if isinstance(value, dt.datetime):
         selected_date = selected_date or value.date().isoformat()
@@ -180,7 +195,11 @@ def _point_payload(value: Point) -> Any:
         return value.strip()
     if isinstance(value, Mapping):
         return copy.deepcopy(dict(value))
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and len(value) == 2:
+    if (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes))
+        and len(value) == 2
+    ):
         longitude, latitude = float(value[0]), float(value[1])
         if not -180 <= longitude <= 180 or not -90 <= latitude <= 90:
             raise InvalidQuery("coordinates must be [longitude, latitude]")
@@ -190,8 +209,16 @@ def _point_payload(value: Point) -> Any:
 
 def _point_rows(values: PointSet, label: str) -> list[dict[str, Any]]:
     point_keys = {"stopId", "stop_id", "coordinate"}
-    coordinate_keys = "lat" in values and ("lon" in values or "lng" in values) if isinstance(values, Mapping) else False
-    if isinstance(values, Mapping) and not (point_keys & values.keys()) and not coordinate_keys:
+    coordinate_keys = (
+        "lat" in values and ("lon" in values or "lng" in values)
+        if isinstance(values, Mapping)
+        else False
+    )
+    if (
+        isinstance(values, Mapping)
+        and not (point_keys & values.keys())
+        and not coordinate_keys
+    ):
         rows = [(str(key), point) for key, point in values.items()]
     elif isinstance(values, (str, Mapping)):
         rows = [(label, values)]
@@ -199,7 +226,9 @@ def _point_rows(values: PointSet, label: str) -> list[dict[str, Any]]:
         if len(values) == 2 and all(isinstance(item, (int, float)) for item in values):
             rows = [(label, values)]
         else:
-            rows = [(f"{label}_{index + 1}", point) for index, point in enumerate(values)]
+            rows = [
+                (f"{label}_{index + 1}", point) for index, point in enumerate(values)
+            ]
     else:
         rows = [(label, values)]
     if not rows:
@@ -255,8 +284,12 @@ class _RouteStream:
             bufsize=1,
             env=_command_environment(city.runtime.command),
         )
-        self._reader = threading.Thread(target=self._read, name="vigo-route-reader", daemon=True)
-        self._error_reader = threading.Thread(target=self._read_errors, name="vigo-route-errors", daemon=True)
+        self._reader = threading.Thread(
+            target=self._read, name="vigo-route-reader", daemon=True
+        )
+        self._error_reader = threading.Thread(
+            target=self._read_errors, name="vigo-route-errors", daemon=True
+        )
         self._reader.start()
         self._error_reader.start()
 
@@ -300,12 +333,16 @@ class _RouteStream:
                 self._process.stdin.flush()
             except OSError as error:
                 self._stop()
-                raise VigoError("VIGO route process stopped while receiving a Query") from error
+                raise VigoError(
+                    "VIGO route process stopped while receiving a Query"
+                ) from error
             try:
                 response = self._responses.get(timeout=self._timeout)
             except queue.Empty as error:
                 self._stop()
-                raise VigoTimeoutError(f"VIGO Route exceeded {self._timeout:g} seconds") from error
+                raise VigoTimeoutError(
+                    f"VIGO Route exceeded {self._timeout:g} seconds"
+                ) from error
             if isinstance(response, BaseException):
                 self._stop()
                 raise response
@@ -313,7 +350,9 @@ class _RouteStream:
                 self._stop()
                 raise VigoError("VIGO returned a Route for the wrong request")
             if response.get("status") == "error":
-                raise VigoError(str(response.get("error", {}).get("message", "Route failed")))
+                raise VigoError(
+                    str(response.get("error", {}).get("message", "Route failed"))
+                )
             return response
 
     def close(self) -> None:
@@ -408,7 +447,11 @@ class Result:
     @property
     def legs(self) -> tuple[dict[str, Any], ...]:
         route = self.value if self.kind == "route" else None
-        return tuple(copy.deepcopy(leg) for leg in route.get("legs", ())) if isinstance(route, Mapping) else ()
+        return (
+            tuple(copy.deepcopy(leg) for leg in route.get("legs", ()))
+            if isinstance(route, Mapping)
+            else ()
+        )
 
     @property
     def record(self) -> dict[str, Any]:
@@ -438,11 +481,16 @@ class Result:
             for index, leg in enumerate(self.legs):
                 coordinates = leg.get("coordinates")
                 if isinstance(coordinates, list) and len(coordinates) >= 2:
-                    features.append({
-                        "type": "Feature",
-                        "properties": {"index": index, "type": leg.get("type")},
-                        "geometry": {"type": "LineString", "coordinates": coordinates},
-                    })
+                    features.append(
+                        {
+                            "type": "Feature",
+                            "properties": {"index": index, "type": leg.get("type")},
+                            "geometry": {
+                                "type": "LineString",
+                                "coordinates": coordinates,
+                            },
+                        }
+                    )
             return {"type": "FeatureCollection", "features": features}
         raise TypeError("only Route and Reach Results have GeoJSON")
 
@@ -450,8 +498,14 @@ class Result:
         destination = Path(path).expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.suffix.lower() in {".geojson", ".json"}:
-            value = self.to_geojson() if destination.suffix.lower() == ".geojson" else self.to_dict()
-            destination.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+            value = (
+                self.to_geojson()
+                if destination.suffix.lower() == ".geojson"
+                else self.to_dict()
+            )
+            destination.write_text(
+                json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+            )
         elif destination.suffix.lower() == ".csv" and self.kind == "matrix":
             rows = list(self.rows)
             fields = list(dict.fromkeys(key for row in rows for key in row))
@@ -542,11 +596,19 @@ class City:
     def route(self, origin: Point, destination: Point, **options: Any) -> Result:
         return self.run(Route(origin, destination, **options))
 
-    def matrix(self, origins: PointSet, destinations: PointSet, **options: Any) -> Result:
+    def matrix(
+        self, origins: PointSet, destinations: PointSet, **options: Any
+    ) -> Result:
         return self.run(Matrix(origins, destinations, **options))
 
     def reach(self, origin: Point, **options: Any) -> Result:
         return self.run(Reach(origin, **options))
+
+    @overload
+    def run(self, query: Query) -> Result: ...
+
+    @overload
+    def run(self, query: Sequence[Query]) -> list[Result]: ...
 
     def run(self, query: Query | Sequence[Query]) -> Result | list[Result]:
         if isinstance(query, Sequence) and not isinstance(query, (str, bytes)):
@@ -566,9 +628,17 @@ class City:
                 raise InvalidQuery("mode must be transit, walk, or drive")
             if query.objective != "earliest_arrival":
                 return Support(False, "objective", ("earliest_arrival",))
-        if isinstance(query, Route) and query.depart_at is not None and query.arrive_by is not None:
+        if (
+            isinstance(query, Route)
+            and query.depart_at is not None
+            and query.arrive_by is not None
+        ):
             raise InvalidQuery("choose depart_at or arrive_by, not both")
-        if isinstance(query, Matrix) and query.depart_at is not None and query.arrive_by is not None:
+        if (
+            isinstance(query, Matrix)
+            and query.depart_at is not None
+            and query.arrive_by is not None
+        ):
             raise InvalidQuery("choose depart_at or arrive_by, not both")
         if isinstance(query, Matrix) and query.arrive_by is not None:
             return Support(False, "arrive_by_matrix", ("depart_at",))
@@ -581,10 +651,16 @@ class City:
         if sum((planned, live, traffic)) > 1:
             return Support(False, "scenario_state_combination")
         if planned:
-            return Support(True) if isinstance(query, Reach) else Support(
-                False,
-                "planned_transit_route" if isinstance(query, Route) else "planned_transit_matrix",
-                ("reach",),
+            return (
+                Support(True)
+                if isinstance(query, Reach)
+                else Support(
+                    False,
+                    "planned_transit_route"
+                    if isinstance(query, Route)
+                    else "planned_transit_matrix",
+                    ("reach",),
+                )
             )
         if live:
             return Support(False, "live_transit_python", ("studio",))
@@ -597,7 +673,7 @@ class City:
         return Support(True)
 
     def submit(self, query: Query | Sequence[Query]) -> Job:
-        return Job(_EXECUTOR.submit(self.run, query))
+        return Job(_EXECUTOR.submit(lambda: self.run(query)))
 
     def scenario(
         self,
@@ -627,7 +703,14 @@ class City:
                 if not self._closing_streams and service_date not in self._stream_users:
                     stream = self._streams.get(service_date)
                     if stream is None and len(self._streams) >= self._stream_limit:
-                        idle = next((date for date in self._streams if date not in self._stream_users), None)
+                        idle = next(
+                            (
+                                date
+                                for date in self._streams
+                                if date not in self._stream_users
+                            ),
+                            None,
+                        )
                         if idle is not None:
                             self._streams.pop(idle).close()
                     if stream is not None or len(self._streams) < self._stream_limit:
@@ -642,7 +725,9 @@ class City:
                         break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise VigoTimeoutError("Timed out waiting for an available VIGO Route process")
+                    raise VigoTimeoutError(
+                        "Timed out waiting for an available VIGO Route process"
+                    )
                 self._lock.wait(timeout=remaining)
         try:
             yield stream
@@ -667,7 +752,9 @@ class City:
 
     def _route(self, query: Route, scenario: Scenario | None) -> Result:
         started = time.perf_counter()
-        selected_time = query.arrive_by if query.arrive_by is not None else query.depart_at
+        selected_time = (
+            query.arrive_by if query.arrive_by is not None else query.depart_at
+        )
         clock, service_date = _clock(selected_time, query.service_date)
         request = {
             "origin": _point_payload(query.origin),
@@ -679,7 +766,11 @@ class City:
             "objective": query.objective,
             "maxWalkKm": query.max_walk_km,
             "departureWindowMinutes": query.departure_window_minutes,
-            **({"traffic": _thaw(scenario.traffic)} if scenario and scenario.traffic else {}),
+            **(
+                {"traffic": _thaw(scenario.traffic)}
+                if scenario and scenario.traffic
+                else {}
+            ),
         }
         if query.mode == "transit" and scenario is None and not query.waypoints:
             with self._stream(service_date) as stream:
@@ -692,13 +783,19 @@ class City:
                 "resultSchemaVersion": RESULT_SCHEMA_VERSION,
                 "kind": "route",
                 "status": response.get("routingStatus", "ready"),
-                "query": {**request, "serviceDate": service_date, "serviceDay": _service_day(service_date)},
+                "query": {
+                    **request,
+                    "serviceDate": service_date,
+                    "serviceDay": _service_day(service_date),
+                },
                 "result": response.get("plan"),
                 "warnings": [],
                 "timing": {
                     **timing,
                     "openMs": timing.get("openMs", timing.get("preparationMs", 0)),
-                    "computeMs": timing.get("computeMs", timing.get("routeMs", timing.get("requestMs"))),
+                    "computeMs": timing.get(
+                        "computeMs", timing.get("routeMs", timing.get("requestMs"))
+                    ),
                 },
             }
         else:
@@ -718,8 +815,15 @@ class City:
                 ],
                 self.timeout,
             )
-        payload.setdefault("timing", {})["endToEndMs"] = round((time.perf_counter() - started) * 1000, 3)
-        return Result("route", _immutable(payload), self.revision_id, scenario.name if scenario else None)
+        payload.setdefault("timing", {})["endToEndMs"] = round(
+            (time.perf_counter() - started) * 1000, 3
+        )
+        return Result(
+            "route",
+            _immutable(payload),
+            self.revision_id,
+            scenario.name if scenario else None,
+        )
 
     def _matrix(self, query: Matrix, scenario: Scenario | None) -> Result:
         clock, service_date = _clock(query.depart_at or "08:00", query.service_date)
@@ -730,8 +834,16 @@ class City:
             "objective": query.objective,
             "horizonMinutes": query.horizon_minutes,
             "walkSpeedKph": query.walk_speed_kph,
-            **({"maxDistanceKm": query.max_distance_km} if query.max_distance_km is not None else {}),
-            **({"traffic": _thaw(scenario.traffic)} if scenario and scenario.traffic else {}),
+            **(
+                {"maxDistanceKm": query.max_distance_km}
+                if query.max_distance_km is not None
+                else {}
+            ),
+            **(
+                {"traffic": _thaw(scenario.traffic)}
+                if scenario and scenario.traffic
+                else {}
+            ),
         }
         payload = _json_command(
             self.runtime,
@@ -748,7 +860,12 @@ class City:
             ],
             self.timeout,
         )
-        return Result("matrix", _immutable(payload), self.revision_id, scenario.name if scenario else None)
+        return Result(
+            "matrix",
+            _immutable(payload),
+            self.revision_id,
+            scenario.name if scenario else None,
+        )
 
     def _reach(self, query: Reach, scenario: Scenario | None) -> Result:
         clock, service_date = _clock(query.depart_at, query.service_date)
@@ -787,7 +904,12 @@ class City:
             ],
             self.timeout,
         )
-        return Result("reach", _immutable(payload), self.revision_id, scenario.name if scenario else None)
+        return Result(
+            "reach",
+            _immutable(payload),
+            self.revision_id,
+            scenario.name if scenario else None,
+        )
 
     def close(self) -> None:
         """Release resident runtime resources held by this City."""
@@ -840,7 +962,9 @@ class Scenario:
             raise TypeError("services must be a sequence of mappings")
         if any(not isinstance(service, Mapping) for service in services):
             raise TypeError("every service must be a mapping")
-        if isinstance(without_routes, (str, bytes)) or not isinstance(without_routes, Sequence):
+        if isinstance(without_routes, (str, bytes)) or not isinstance(
+            without_routes, Sequence
+        ):
             raise TypeError("without_routes must be a sequence of route ids")
         route_ids = tuple(str(route_id).strip() for route_id in without_routes)
         if any(not route_id for route_id in route_ids):
@@ -870,11 +994,19 @@ class Scenario:
     def route(self, origin: Point, destination: Point, **options: Any) -> Result:
         return self.run(Route(origin, destination, **options))
 
-    def matrix(self, origins: PointSet, destinations: PointSet, **options: Any) -> Result:
+    def matrix(
+        self, origins: PointSet, destinations: PointSet, **options: Any
+    ) -> Result:
         return self.run(Matrix(origins, destinations, **options))
 
     def reach(self, origin: Point, **options: Any) -> Result:
         return self.run(Reach(origin, **options))
+
+    @overload
+    def run(self, query: Query) -> Result: ...
+
+    @overload
+    def run(self, query: Sequence[Query]) -> list[Result]: ...
 
     def run(self, query: Query | Sequence[Query]) -> Result | list[Result]:
         if isinstance(query, Sequence) and not isinstance(query, (str, bytes)):
@@ -887,7 +1019,7 @@ class Scenario:
         return self.city._support(query, self)
 
     def submit(self, query: Query | Sequence[Query]) -> Job:
-        return Job(_EXECUTOR.submit(self.run, query))
+        return Job(_EXECUTOR.submit(lambda: self.run(query)))
 
 
 def open(
@@ -903,7 +1035,9 @@ def open(
     routing = path / "routing" / "project.sqlite"
     streets = path / "osm" / "street-index.sqlite"
     if not manifest_path.is_file() or not routing.is_file() or not streets.is_file():
-        raise VigoError("City must contain network.json, routing/project.sqlite, and osm/street-index.sqlite")
+        raise VigoError(
+            "City must contain network.json, routing/project.sqlite, and osm/street-index.sqlite"
+        )
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -937,14 +1071,18 @@ def build(
         *(f"--gtfs={Path(source).expanduser().resolve()}" for source in sources),
         f"--osm={Path(osm).expanduser().resolve()}",
         f"--output={output_path}",
-        *( ["--replace"] if replace else [] ),
+        *(["--replace"] if replace else []),
     ]
     run_json(runtime_info, arguments, timeout=timeout)
     return open(output_path, runtime=runtime_info)
 
 
-def _finite(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+def _finite(value: Any) -> TypeGuard[int | float]:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
 
 def _comparison_counts(pairs: Any, unit: str) -> dict[str, Any]:
@@ -978,8 +1116,12 @@ def compare(before: Result, after: Result) -> Result:
     if before.kind == "route":
         left = before.value or {}
         right = after.value or {}
-        left_duration = left.get("durationMinutes") if before.status == "ready" else None
-        right_duration = right.get("durationMinutes") if after.status == "ready" else None
+        left_duration = (
+            left.get("durationMinutes") if before.status == "ready" else None
+        )
+        right_duration = (
+            right.get("durationMinutes") if after.status == "ready" else None
+        )
         left_transfers = left.get("transfers") if before.status == "ready" else None
         right_transfers = right.get("transfers") if after.status == "ready" else None
         change = {
@@ -991,23 +1133,36 @@ def compare(before: Result, after: Result) -> Result:
                 else None
             ),
             "transferChange": right_transfers - left_transfers
-            if _finite(left_transfers) and _finite(right_transfers) else None,
+            if _finite(left_transfers) and _finite(right_transfers)
+            else None,
         }
     elif before.kind == "matrix":
+
         def key(row: Mapping[str, Any]) -> tuple[Any, Any]:
             return (
-                row.get("originId") if row.get("originId") is not None else row.get("originIndex"),
-                row.get("destinationId") if row.get("destinationId") is not None else row.get("destinationIndex"),
+                row.get("originId")
+                if row.get("originId") is not None
+                else row.get("originIndex"),
+                row.get("destinationId")
+                if row.get("destinationId") is not None
+                else row.get("destinationIndex"),
             )
+
         left_rows = {key(row): row for row in before.rows}
         pairs = []
         for row in after.rows:
             previous = left_rows.get(key(row))
             if previous is not None:
-                pairs.append((
-                    previous.get("durationMinutes") if previous.get("status") != "blocked" else None,
-                    row.get("durationMinutes") if row.get("status") != "blocked" else None,
-                ))
+                pairs.append(
+                    (
+                        previous.get("durationMinutes")
+                        if previous.get("status") != "blocked"
+                        else None,
+                        row.get("durationMinutes")
+                        if row.get("status") != "blocked"
+                        else None,
+                    )
+                )
         change = _comparison_counts(pairs, "Pairs")
     else:
         left_grid = before.to_dict().get("surface", {})
@@ -1016,15 +1171,25 @@ def compare(before: Result, after: Result) -> Result:
         width, height = left_grid.get("width"), left_grid.get("height")
         bounds = left_grid.get("bounds")
         if (
-            not isinstance(left_values, list) or not isinstance(right_values, list)
-            or type(width) is not int or type(height) is not int or width <= 0 or height <= 0
-            or len(left_values) != len(right_values) or len(left_values) != width * height
-            or width != right_grid.get("width") or height != right_grid.get("height")
-            or not isinstance(bounds, list) or len(bounds) != 4 or not all(map(_finite, bounds))
+            not isinstance(left_values, list)
+            or not isinstance(right_values, list)
+            or type(width) is not int
+            or type(height) is not int
+            or width <= 0
+            or height <= 0
+            or len(left_values) != len(right_values)
+            or len(left_values) != width * height
+            or width != right_grid.get("width")
+            or height != right_grid.get("height")
+            or not isinstance(bounds, list)
+            or len(bounds) != 4
+            or not all(map(_finite, bounds))
             or bounds != right_grid.get("bounds")
         ):
             raise ValueError("Reach Results must use the same grid")
-        change = _comparison_counts(zip(left_values, right_values), "Cells")
+        change = _comparison_counts(
+            zip(left_values, right_values, strict=True), "Cells"
+        )
 
     payload = {
         "schemaVersion": "vigo.result.comparison.v1",
