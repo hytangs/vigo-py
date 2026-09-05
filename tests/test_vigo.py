@@ -5,7 +5,9 @@ import json
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import vigo
@@ -300,6 +302,69 @@ class VigoPythonTest(unittest.TestCase):
         del city
         gc.collect()
         self.assertIsNotNone(process.poll())
+
+    def test_date_pool_reuses_recent_dates_and_closes_evicted_processes(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city:
+            city._stream_limit = 2
+            def route(date):
+                return city.route("A", "B", depart_at="08:00", service_date=date)
+            route("2026-09-04")
+            first = city._streams["2026-09-04"]
+            route("2026-09-05")
+            second = city._streams["2026-09-05"]
+            route("2026-09-04")
+            self.assertIs(city._streams["2026-09-04"], first)
+            for day in range(6, 12):
+                self.assertEqual(route(f"2026-09-{day:02d}").status, "ready")
+                self.assertLessEqual(len(city._streams), 2)
+            self.assertFalse(first.alive)
+            self.assertFalse(second.alive)
+            for stream in (first, second):
+                self.assertTrue(stream._process.stdin.closed)
+                self.assertTrue(stream._process.stdout.closed)
+                self.assertTrue(stream._process.stderr.closed)
+
+    def test_busy_date_pool_times_out_without_evicting_active_query(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city, ThreadPoolExecutor(max_workers=1) as executor:
+            city._stream_limit = 1
+            city.timeout = 0.1
+            with city._stream("2026-09-04") as active:
+                future = executor.submit(city.route, "A", "B", depart_at="08:00", service_date="2026-09-05")
+                with self.assertRaisesRegex(vigo.VigoTimeoutError, "available VIGO Route process"):
+                    future.result(timeout=5)
+                self.assertTrue(active.alive)
+                self.assertEqual(list(city._streams), ["2026-09-04"])
+            city.timeout = 5
+            self.assertEqual(city.route("A", "B", depart_at="08:00", service_date="2026-09-05").status, "ready")
+            self.assertFalse(active.alive)
+
+    def test_city_close_waits_for_active_stream_and_query_failure_releases_it(self) -> None:
+        city = vigo.open(self.city_path, runtime=self.command)
+        entered = threading.Event()
+        def close():
+            entered.set()
+            city.close()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with city._stream("2026-09-04") as active:
+                future = executor.submit(close)
+                self.assertTrue(entered.wait(timeout=5))
+                self.assertFalse(future.done())
+                self.assertTrue(active.alive)
+            future.result(timeout=5)
+            self.assertFalse(active.alive)
+        with self.assertRaisesRegex(RuntimeError, "Query failed"), city._stream("2026-09-05"):
+            raise RuntimeError("Query failed")
+        self.assertFalse(city._stream_users)
+        city.close()
+
+    def test_different_dates_can_query_while_another_stream_is_busy(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city, ThreadPoolExecutor(max_workers=1) as executor:
+            city._stream_limit = 2
+            with city._stream("2026-09-04") as active:
+                future = executor.submit(city.route, "A", "B", depart_at="08:00", service_date="2026-09-05")
+                self.assertEqual(future.result(timeout=5).status, "ready")
+                self.assertTrue(active.alive)
+                self.assertEqual(len(city._streams), 2)
 
     def test_after_midnight_query_keeps_its_service_date(self) -> None:
         with vigo.open(self.city_path, runtime=self.command) as city:

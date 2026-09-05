@@ -105,7 +105,7 @@ results = city.run(requests)
 
 The 0.3.0 Route objective is explicit and singular: earliest arrival, then fewer boardings, then less walking, then a stable final order.
 
-Repeated transit Route calls reuse one open process for the selected service date. Route answers themselves are recomputed.
+Repeated transit Route calls reuse an open process for the selected service date. Each open City keeps a bounded pool of one to four processes, according to available CPU and memory. Switching dates reclaims the least recently used idle process; active queries finish before their process is closed. Route answers themselves are recomputed.
 
 ## Matrix
 

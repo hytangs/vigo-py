@@ -14,8 +14,9 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -505,7 +506,10 @@ class City:
         if not math.isfinite(self.timeout) or self.timeout <= 0:
             raise ValueError("timeout must be finite and positive")
         self._streams: dict[str, _RouteStream] = {}
-        self._lock = threading.Lock()
+        self._stream_users: set[str] = set()
+        self._stream_limit = _job_worker_count()
+        self._closing_streams = False
+        self._lock = threading.Condition()
         weakref.finalize(self, _close_route_streams, self._streams)
 
     @property
@@ -615,15 +619,37 @@ class City:
             expires_at=expires_at,
         )
 
-    def _stream(self, service_date: str) -> _RouteStream:
+    @contextmanager
+    def _stream(self, service_date: str) -> Iterator[_RouteStream]:
+        deadline = time.monotonic() + self.timeout
         with self._lock:
-            stream = self._streams.get(service_date)
-            if stream is None or not stream.alive:
-                if stream is not None:
-                    stream.close()
-                stream = _RouteStream(self, service_date, self.timeout)
-                self._streams[service_date] = stream
-            return stream
+            while True:
+                if not self._closing_streams and service_date not in self._stream_users:
+                    stream = self._streams.get(service_date)
+                    if stream is None and len(self._streams) >= self._stream_limit:
+                        idle = next((date for date in self._streams if date not in self._stream_users), None)
+                        if idle is not None:
+                            self._streams.pop(idle).close()
+                    if stream is not None or len(self._streams) < self._stream_limit:
+                        if stream is None or not stream.alive:
+                            if stream is not None:
+                                stream.close()
+                            stream = _RouteStream(self, service_date, self.timeout)
+                        # Dictionary order records use; only idle dates may be evicted.
+                        self._streams.pop(service_date, None)
+                        self._streams[service_date] = stream
+                        self._stream_users.add(service_date)
+                        break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise VigoTimeoutError("Timed out waiting for an available VIGO Route process")
+                self._lock.wait(timeout=remaining)
+        try:
+            yield stream
+        finally:
+            with self._lock:
+                self._stream_users.remove(service_date)
+                self._lock.notify_all()
 
     def _execute(self, query: Query, scenario: Scenario | None) -> Result:
         if scenario is not None:
@@ -656,7 +682,8 @@ class City:
             **({"traffic": _thaw(scenario.traffic)} if scenario and scenario.traffic else {}),
         }
         if query.mode == "transit" and scenario is None and not query.waypoints:
-            response = self._stream(service_date).route(request)
+            with self._stream(service_date) as stream:
+                response = stream.route(request)
             timing = response.get("timing", {})
             payload = {
                 "schemaVersion": "vigo.result.route.v1",
@@ -765,7 +792,16 @@ class City:
     def close(self) -> None:
         """Release resident runtime resources held by this City."""
         with self._lock:
-            _close_route_streams(self._streams)
+            while self._closing_streams:
+                self._lock.wait()
+            self._closing_streams = True
+            try:
+                while self._stream_users:
+                    self._lock.wait()
+                _close_route_streams(self._streams)
+            finally:
+                self._closing_streams = False
+                self._lock.notify_all()
 
     def __enter__(self: _CityT) -> _CityT:
         return self
