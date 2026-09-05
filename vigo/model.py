@@ -4,12 +4,15 @@ import copy
 import csv
 import datetime as dt
 import json
+import math
 import os
 import queue
 import re
 import subprocess
 import tempfile
 import threading
+import time
+import weakref
 from collections import deque
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -26,6 +29,7 @@ from .runtime import (
     RuntimeInfo,
     VigoError,
     VigoTimeoutError,
+    _command_environment,
     resolve_runtime,
     run_json,
 )
@@ -116,6 +120,22 @@ def _immutable(value: Mapping[str, Any]) -> Mapping[str, Any]:
     return MappingProxyType(copy.deepcopy(dict(value)))
 
 
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return copy.deepcopy(value)
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thaw(item) for item in value]
+    return copy.deepcopy(value)
+
+
 def _date_text(value: str | dt.date | None) -> str | None:
     if value is None:
         return None
@@ -137,7 +157,7 @@ def _clock(value: str | dt.time | dt.datetime | None, service_date: str | dt.dat
     elif isinstance(value, dt.time):
         clock = value.strftime("%H:%M")
     elif isinstance(value, str):
-        match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", value)
+        match = re.fullmatch(r"([01]?\d|2\d):([0-5]\d)", value)
         if match is None:
             raise InvalidQuery("time must use HH:MM")
         clock = f"{int(match.group(1)):02d}:{match.group(2)}"
@@ -216,6 +236,7 @@ class _RouteStream:
         self._timeout = timeout
         self._lock = threading.Lock()
         self._sequence = 0
+        self._closed = False
         self._responses: queue.Queue[dict[str, Any] | BaseException] = queue.Queue()
         self._errors: deque[str] = deque(maxlen=40)
         self._process = subprocess.Popen(
@@ -231,6 +252,7 @@ class _RouteStream:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=_command_environment(city.runtime.command),
         )
         self._reader = threading.Thread(target=self._read, name="vigo-route-reader", daemon=True)
         self._error_reader = threading.Thread(target=self._read_errors, name="vigo-route-errors", daemon=True)
@@ -256,39 +278,56 @@ class _RouteStream:
                     self._responses.put(error)
                     return
         finally:
-            if self._process.poll() is not None:
-                detail = "\n".join(self._errors)
-                self._responses.put(VigoError(detail or "VIGO route process stopped"))
+            detail = "\n".join(self._errors)
+            self._responses.put(VigoError(detail or "VIGO route process stopped"))
+
+    @property
+    def alive(self) -> bool:
+        return not self._closed and self._process.poll() is None
 
     def route(self, request: Mapping[str, Any]) -> dict[str, Any]:
         with self._lock:
-            if self._process.poll() is not None:
+            if not self.alive:
                 raise VigoError("VIGO route process is not running")
             self._sequence += 1
             request_id = f"python_{self._sequence}"
             message = {"id": request_id, **copy.deepcopy(dict(request))}
             assert self._process.stdin is not None
-            self._process.stdin.write(json.dumps(message, allow_nan=False) + "\n")
-            self._process.stdin.flush()
+            encoded = json.dumps(message, allow_nan=False) + "\n"
+            try:
+                self._process.stdin.write(encoded)
+                self._process.stdin.flush()
+            except OSError as error:
+                self._stop()
+                raise VigoError("VIGO route process stopped while receiving a Query") from error
             try:
                 response = self._responses.get(timeout=self._timeout)
             except queue.Empty as error:
-                self.close()
+                self._stop()
                 raise VigoTimeoutError(f"VIGO Route exceeded {self._timeout:g} seconds") from error
             if isinstance(response, BaseException):
+                self._stop()
                 raise response
             if response.get("id") != request_id:
-                self.close()
+                self._stop()
                 raise VigoError("VIGO returned a Route for the wrong request")
             if response.get("status") == "error":
                 raise VigoError(str(response.get("error", {}).get("message", "Route failed")))
             return response
 
     def close(self) -> None:
-        if self._process.poll() is not None:
+        with self._lock:
+            self._stop()
+
+    def _stop(self) -> None:
+        if self._closed:
             return
+        self._closed = True
         if self._process.stdin:
-            self._process.stdin.close()
+            try:
+                self._process.stdin.close()
+            except OSError:
+                pass
         try:
             self._process.wait(timeout=1)
         except subprocess.TimeoutExpired:
@@ -297,6 +336,19 @@ class _RouteStream:
                 self._process.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 self._process.kill()
+                self._process.wait()
+        self._reader.join(timeout=1)
+        self._error_reader.join(timeout=1)
+        for pipe in (self._process.stdout, self._process.stderr):
+            if pipe is not None:
+                pipe.close()
+
+
+def _close_route_streams(streams: dict[str, _RouteStream]) -> None:
+    active = list(streams.values())
+    streams.clear()
+    for stream in active:
+        stream.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,10 +502,11 @@ class City:
         self.runtime = runtime
         self._manifest = _immutable(manifest)
         self.timeout = float(timeout)
-        if self.timeout <= 0:
-            raise ValueError("timeout must be positive")
+        if not math.isfinite(self.timeout) or self.timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
         self._streams: dict[str, _RouteStream] = {}
         self._lock = threading.Lock()
+        weakref.finalize(self, _close_route_streams, self._streams)
 
     @property
     def name(self) -> str:
@@ -565,7 +618,9 @@ class City:
     def _stream(self, service_date: str) -> _RouteStream:
         with self._lock:
             stream = self._streams.get(service_date)
-            if stream is None:
+            if stream is None or not stream.alive:
+                if stream is not None:
+                    stream.close()
                 stream = _RouteStream(self, service_date, self.timeout)
                 self._streams[service_date] = stream
             return stream
@@ -585,6 +640,7 @@ class City:
         raise TypeError("query must be Route, Matrix, or Reach")
 
     def _route(self, query: Route, scenario: Scenario | None) -> Result:
+        started = time.perf_counter()
         selected_time = query.arrive_by if query.arrive_by is not None else query.depart_at
         clock, service_date = _clock(selected_time, query.service_date)
         request = {
@@ -597,10 +653,11 @@ class City:
             "objective": query.objective,
             "maxWalkKm": query.max_walk_km,
             "departureWindowMinutes": query.departure_window_minutes,
-            **({"traffic": dict(scenario.traffic)} if scenario and scenario.traffic else {}),
+            **({"traffic": _thaw(scenario.traffic)} if scenario and scenario.traffic else {}),
         }
         if query.mode == "transit" and scenario is None and not query.waypoints:
             response = self._stream(service_date).route(request)
+            timing = response.get("timing", {})
             payload = {
                 "schemaVersion": "vigo.result.route.v1",
                 "productVersion": self.runtime.product_version,
@@ -608,10 +665,14 @@ class City:
                 "resultSchemaVersion": RESULT_SCHEMA_VERSION,
                 "kind": "route",
                 "status": response.get("routingStatus", "ready"),
-                "query": request,
+                "query": {**request, "serviceDate": service_date, "serviceDay": _service_day(service_date)},
                 "result": response.get("plan"),
                 "warnings": [],
-                "timing": response.get("timing", {}),
+                "timing": {
+                    **timing,
+                    "openMs": timing.get("openMs", timing.get("preparationMs", 0)),
+                    "computeMs": timing.get("computeMs", timing.get("routeMs", timing.get("requestMs"))),
+                },
             }
         else:
             payload = _json_command(
@@ -630,6 +691,7 @@ class City:
                 ],
                 self.timeout,
             )
+        payload.setdefault("timing", {})["endToEndMs"] = round((time.perf_counter() - started) * 1000, 3)
         return Result("route", _immutable(payload), self.revision_id, scenario.name if scenario else None)
 
     def _matrix(self, query: Matrix, scenario: Scenario | None) -> Result:
@@ -642,7 +704,7 @@ class City:
             "horizonMinutes": query.horizon_minutes,
             "walkSpeedKph": query.walk_speed_kph,
             **({"maxDistanceKm": query.max_distance_km} if query.max_distance_km is not None else {}),
-            **({"traffic": dict(scenario.traffic)} if scenario and scenario.traffic else {}),
+            **({"traffic": _thaw(scenario.traffic)} if scenario and scenario.traffic else {}),
         }
         payload = _json_command(
             self.runtime,
@@ -674,7 +736,7 @@ class City:
                     "scenario": {
                         "id": "scenario",
                         "name": scenario.name,
-                        "services": [dict(service) for service in scenario.services],
+                        "services": _thaw(scenario.services),
                         "excludedRouteIds": list(scenario.without_routes),
                     }
                 }
@@ -703,10 +765,7 @@ class City:
     def close(self) -> None:
         """Release resident runtime resources held by this City."""
         with self._lock:
-            streams = list(self._streams.values())
-            self._streams.clear()
-        for stream in streams:
-            stream.close()
+            _close_route_streams(self._streams)
 
     def __enter__(self: _CityT) -> _CityT:
         return self
@@ -758,10 +817,10 @@ class Scenario:
         object.__setattr__(self, "city", city)
         object.__setattr__(self, "city_revision_id", city.revision_id)
         object.__setattr__(self, "name", name.strip())
-        object.__setattr__(self, "services", tuple(_immutable(service) for service in services))
+        object.__setattr__(self, "services", _freeze(services))
         object.__setattr__(self, "without_routes", tuple(dict.fromkeys(route_ids)))
-        object.__setattr__(self, "live", _immutable(live) if live is not None else None)
-        object.__setattr__(self, "traffic", _immutable(traffic) if traffic is not None else None)
+        object.__setattr__(self, "live", _freeze(live))
+        object.__setattr__(self, "traffic", _freeze(traffic))
         object.__setattr__(self, "expires_at", expires_at)
 
     def _check(self) -> None:
@@ -848,6 +907,31 @@ def build(
     return open(output_path, runtime=runtime_info)
 
 
+def _finite(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _comparison_counts(pairs: Any, unit: str) -> dict[str, Any]:
+    changes = []
+    newly_reachable = 0
+    no_longer_reachable = 0
+    for left, right in pairs:
+        left_ready, right_ready = _finite(left), _finite(right)
+        newly_reachable += int(not left_ready and right_ready)
+        no_longer_reachable += int(left_ready and not right_ready)
+        if left_ready and right_ready:
+            changes.append(right - left)
+    return {
+        f"comparable{unit}": len(changes),
+        f"faster{unit}": sum(value < -1e-9 for value in changes),
+        f"slower{unit}": sum(value > 1e-9 for value in changes),
+        f"unchanged{unit}": sum(abs(value) <= 1e-9 for value in changes),
+        f"newlyReachable{unit}": newly_reachable,
+        f"noLongerReachable{unit}": no_longer_reachable,
+        "meanChangeMinutes": round(sum(changes) / len(changes), 3) if changes else None,
+    }
+
+
 def compare(before: Result, after: Result) -> Result:
     """Compare two compatible Results without rerunning either Query."""
 
@@ -858,51 +942,53 @@ def compare(before: Result, after: Result) -> Result:
     if before.kind == "route":
         left = before.value or {}
         right = after.value or {}
-        left_duration = left.get("durationMinutes")
-        right_duration = right.get("durationMinutes")
+        left_duration = left.get("durationMinutes") if before.status == "ready" else None
+        right_duration = right.get("durationMinutes") if after.status == "ready" else None
+        left_transfers = left.get("transfers") if before.status == "ready" else None
+        right_transfers = right.get("transfers") if after.status == "ready" else None
         change = {
             "beforeStatus": before.status,
             "afterStatus": after.status,
             "durationChangeMinutes": (
-                float(right_duration) - float(left_duration)
-                if left_duration is not None and right_duration is not None
+                round(right_duration - left_duration, 3)
+                if _finite(left_duration) and _finite(right_duration)
                 else None
             ),
-            "transferChange": int(right.get("transfers", 0)) - int(left.get("transfers", 0)),
+            "transferChange": right_transfers - left_transfers
+            if _finite(left_transfers) and _finite(right_transfers) else None,
         }
     elif before.kind == "matrix":
-        key = lambda row: (row.get("originId", row.get("originIndex")), row.get("destinationId", row.get("destinationIndex")))
+        def key(row: Mapping[str, Any]) -> tuple[Any, Any]:
+            return (
+                row.get("originId") if row.get("originId") is not None else row.get("originIndex"),
+                row.get("destinationId") if row.get("destinationId") is not None else row.get("destinationIndex"),
+            )
         left_rows = {key(row): row for row in before.rows}
-        changes = []
+        pairs = []
         for row in after.rows:
             previous = left_rows.get(key(row))
-            if not previous or previous.get("durationMinutes") is None or row.get("durationMinutes") is None:
-                continue
-            changes.append(float(row["durationMinutes"]) - float(previous["durationMinutes"]))
-        change = {
-            "comparablePairs": len(changes),
-            "fasterPairs": sum(value < 0 for value in changes),
-            "slowerPairs": sum(value > 0 for value in changes),
-            "unchangedPairs": sum(value == 0 for value in changes),
-            "meanChangeMinutes": sum(changes) / len(changes) if changes else None,
-        }
+            if previous is not None:
+                pairs.append((
+                    previous.get("durationMinutes") if previous.get("status") != "blocked" else None,
+                    row.get("durationMinutes") if row.get("status") != "blocked" else None,
+                ))
+        change = _comparison_counts(pairs, "Pairs")
     else:
-        left_values = before.to_dict().get("surface", {}).get("values", [])
-        right_values = after.to_dict().get("surface", {}).get("values", [])
-        if len(left_values) != len(right_values):
+        left_grid = before.to_dict().get("surface", {})
+        right_grid = after.to_dict().get("surface", {})
+        left_values, right_values = left_grid.get("values"), right_grid.get("values")
+        width, height = left_grid.get("width"), left_grid.get("height")
+        bounds = left_grid.get("bounds")
+        if (
+            not isinstance(left_values, list) or not isinstance(right_values, list)
+            or type(width) is not int or type(height) is not int or width <= 0 or height <= 0
+            or len(left_values) != len(right_values) or len(left_values) != width * height
+            or width != right_grid.get("width") or height != right_grid.get("height")
+            or not isinstance(bounds, list) or len(bounds) != 4 or not all(map(_finite, bounds))
+            or bounds != right_grid.get("bounds")
+        ):
             raise ValueError("Reach Results must use the same grid")
-        changes = [
-            float(right) - float(left)
-            for left, right in zip(left_values, right_values)
-            if isinstance(left, (int, float)) and isinstance(right, (int, float))
-        ]
-        change = {
-            "comparableCells": len(changes),
-            "fasterCells": sum(value < 0 for value in changes),
-            "slowerCells": sum(value > 0 for value in changes),
-            "unchangedCells": sum(value == 0 for value in changes),
-            "meanChangeMinutes": sum(changes) / len(changes) if changes else None,
-        }
+        change = _comparison_counts(zip(left_values, right_values), "Cells")
 
     payload = {
         "schemaVersion": "vigo.result.comparison.v1",

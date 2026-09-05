@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import sys
 import tempfile
@@ -258,6 +259,88 @@ class VigoPythonTest(unittest.TestCase):
             self.assertEqual(support.available, ("depart_at",))
             with self.assertRaises(vigo.UnsupportedQuery):
                 city.run(query)
+
+    def test_scenario_nested_values_are_immutable_and_serializable(self) -> None:
+        stops = [{"coordinate": [0, 0]}, {"coordinate": [1, 1]}]
+        with vigo.open(self.city_path, runtime=self.command) as city:
+            scenario = city.scenario("Frozen", services=[{"stops": stops}])
+            stops[0]["coordinate"][0] = 40
+            with self.assertRaises(TypeError):
+                scenario.services[0]["stops"][0]["coordinate"][0] = 50
+            traffic = city.scenario("Traffic", traffic={"observations": [{"delayFactor": 2}]})
+            with self.assertRaises(TypeError):
+                traffic.traffic["observations"][0]["delayFactor"] = 3
+            result = scenario.reach([0, 0], service_date="2026-09-04", raster_size=48)
+            self.assertEqual(result.query["scenario"]["services"][0]["stops"][0]["coordinate"], [0, 0])
+
+    def test_route_stream_recovers_and_closes_all_pipes(self) -> None:
+        city = vigo.open(self.city_path, runtime=self.command)
+        options = {"depart_at": "08:00", "service_date": "2026-09-04"}
+        city.route("A", "B", **options)
+        old = city._streams["2026-09-04"]
+        old._process.kill()
+        old._process.wait()
+        result = city.route("A", "B", **options)
+        current = city._streams["2026-09-04"]
+        self.assertEqual(result.status, "ready")
+        self.assertIsNot(current, old)
+        city.close()
+        for stream in (old, current):
+            self.assertIsNotNone(stream._process.poll())
+            self.assertTrue(stream._process.stdin.closed)
+            self.assertTrue(stream._process.stdout.closed)
+            self.assertTrue(stream._process.stderr.closed)
+            self.assertFalse(stream._reader.is_alive())
+            self.assertFalse(stream._error_reader.is_alive())
+
+    def test_discarded_city_releases_resident_process(self) -> None:
+        city = vigo.open(self.city_path, runtime=self.command)
+        city.route("A", "B", depart_at="08:00", service_date="2026-09-04")
+        process = city._streams["2026-09-04"]._process
+        del city
+        gc.collect()
+        self.assertIsNotNone(process.poll())
+
+    def test_after_midnight_query_keeps_its_service_date(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city:
+            result = city.route("A", "B", depart_at="25:15", service_date="2026-09-04")
+        self.assertEqual(result.query["time"], "25:15")
+        self.assertEqual(result.query["serviceDate"], "2026-09-04")
+
+    def test_comparison_preserves_unreachable_values_and_grid_identity(self) -> None:
+        def result(kind, **payload):
+            return vigo.Result(kind, {"resultSchemaVersion": 1, "status": "ready", **payload}, "city")
+
+        def reach(values, bounds=(0, 0, 1, 1), width=2, height=2):
+            return result("reach", surface={"values": values, "bounds": list(bounds), "width": width, "height": height})
+
+        difference = vigo.compare(reach([None, 10, 0, None]), reach([20, None, 0, None])).value
+        self.assertEqual(difference["comparableCells"], 1)
+        self.assertEqual(difference["meanChangeMinutes"], 0)
+        self.assertEqual(difference["newlyReachableCells"], 1)
+        self.assertEqual(difference["noLongerReachableCells"], 1)
+        for other in (reach([1, 2, 3, 4], bounds=(1, 1, 2, 2)), reach([1, 2, 3, 4], width=1, height=4)):
+            with self.assertRaisesRegex(ValueError, "same grid"):
+                vigo.compare(reach([1, 2, 3, 4]), other)
+        before = result("route", status="blocked", result={"durationMinutes": None, "transfers": None})
+        after = result("route", result={"durationMinutes": 10, "transfers": 1})
+        self.assertIsNone(vigo.compare(before, after).value["transferChange"])
+        self.assertIsNone(vigo.compare(before, after).value["durationChangeMinutes"])
+
+    def test_studio_runtime_uses_the_packaged_electron_layout(self) -> None:
+        from vigo.runtime import _command_environment
+
+        app = self.root.resolve() / "VIGO Studio.app"
+        executable = app / "Contents" / "MacOS" / "VIGO Studio"
+        program = app / "Contents" / "Resources" / "app" / "public" / "vigo.mjs"
+        for artifact in (executable, program):
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.touch()
+        runtime = vigo.resolve_runtime(app, verify=False)
+        self.assertEqual(runtime.command, (str(executable), str(program)))
+        environment = _command_environment(runtime.command)
+        self.assertEqual(environment["ELECTRON_RUN_AS_NODE"], "1")
+        self.assertEqual(Path(environment["VIGO_NATIVE_ROUTING_KERNEL"]), program.parent.parent / "server" / "vigo-routing-kernel.node")
 
 
 if __name__ == "__main__":

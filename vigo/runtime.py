@@ -37,12 +37,23 @@ class RuntimeInfo:
 
 
 def _app_command(app: Path) -> tuple[str, ...] | None:
-    resources = app.expanduser().resolve() / "Contents" / "Resources" / "bin"
-    node = resources / "node"
-    program = resources / "vigo.mjs"
-    if node.is_file() and program.is_file():
-        return (str(node), str(program))
+    contents = app.expanduser().resolve() / "Contents"
+    executable = contents / "MacOS" / "VIGO Studio"
+    program = contents / "Resources" / "app" / "public" / "vigo.mjs"
+    if executable.is_file() and program.is_file():
+        return (str(executable), str(program))
     return None
+
+
+def _command_environment(command: Sequence[str]) -> dict[str, str]:
+    environment = os.environ.copy()
+    executable = Path(command[0])
+    if executable.parent.name == "MacOS" and executable.parent.parent.name == "Contents":
+        environment["ELECTRON_RUN_AS_NODE"] = "1"
+        environment["VIGO_NATIVE_ROUTING_KERNEL"] = str(
+            executable.parent.parent / "Resources" / "app" / "server" / "vigo-routing-kernel.node"
+        )
+    return environment
 
 
 def _path_command(value: str | os.PathLike[str]) -> tuple[str, ...] | None:
@@ -104,6 +115,7 @@ def _run(command: Sequence[str], *arguments: str, timeout: float = 30.0) -> subp
             text=True,
             check=False,
             timeout=timeout,
+            env=_command_environment(command),
         )
     except subprocess.TimeoutExpired as error:
         raise VigoTimeoutError(f"VIGO did not respond within {timeout:g} seconds") from error
