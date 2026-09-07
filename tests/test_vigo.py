@@ -36,7 +36,7 @@ if args == ["capabilities"]:
         "publicCliCommands": ["build", "capabilities", "inspect", "route", "matrix", "reach", "compare"],
         "queries": [
             {"id": "route", "maxTransfers": {"min": 0, "max": 31, "default": None}},
-            {"id": "matrix", "resident": True,
+            {"id": "matrix", "resident": True, "journeys": True,
              "maxTransfers": {"min": 0, "max": 31, "default": None},
              "time": {"available": ["depart_at", "arrive_by"]}},
         ],
@@ -289,7 +289,7 @@ class VigoPythonTest(unittest.TestCase):
     def test_arrive_by_matrix_preserves_direction_time_and_large_origins(self) -> None:
         with vigo.open(self.city_path, runtime=self.command) as city:
             query = vigo.Matrix(
-                {f"student_{i}": "A" for i in range(1024)},
+                {f"point_{i}": "A" for i in range(1024)},
                 {"b": "B"},
                 arrive_by="08:30",
                 service_date="2026-09-04",
@@ -306,6 +306,12 @@ class VigoPythonTest(unittest.TestCase):
             self.assertIs(city._streams["2026-09-04"], stream)
 
     def test_transfer_caps_preserve_zero_and_reject_invalid_values(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city:
+            result = city.matrix(["A"], ["B"], service_date="2026-09-04", include_journeys=True, include_geometry=True)
+            self.assertTrue(result.query["includeJourneys"])
+            self.assertTrue(result.query["includeGeometry"])
+            self.assertFalse(city.supports(vigo.Matrix(["A"], ["B"], include_geometry=True)).supported)
+            self.assertFalse(city.supports(vigo.Matrix(["A"], ["B"], mode="drive", include_journeys=True)).supported)
         with vigo.open(self.city_path, runtime=self.command) as city:
             for cap in (None, 0, 1, 31):
                 for query in (
@@ -334,6 +340,7 @@ class VigoPythonTest(unittest.TestCase):
                 vigo.Route("A", "B", max_transfers=0),
                 vigo.Matrix(["A"], ["B"], max_transfers=1),
                 vigo.Matrix(["A"], ["B"], arrive_by="08:30"),
+                vigo.Matrix(["A"], ["B"], include_journeys=True),
             ):
                 self.assertFalse(city.supports(query).supported)
                 with self.assertRaises(vigo.UnsupportedQuery):

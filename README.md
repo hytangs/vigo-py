@@ -157,6 +157,14 @@ the network is loaded once. Closing the City releases those processes. Older
 runtimes retain their one-shot depart-at Matrix execution; Python rejects
 arrive-by Matrix when the runtime does not advertise it.
 
+For transit matrices, `include_journeys=True` adds actual arrival, walking,
+waiting, ride time, transfers, and timed trip/stop legs to each ready row's
+`journey`. Add `include_geometry=True` to materialize those selected paths with
+the same renderer as Route, without repeating timetable searches. The runtime
+must advertise journey support. Equal-objective paths can differ from Route's
+stable traversal order. The outer arrive-by row still reports the deadline;
+the nested journey reports actual arrival.
+
 ## Reach
 
 Reach answers where the modeled network can travel within stated time limits. It does not count people, jobs, schools, or other opportunities.

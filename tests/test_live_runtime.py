@@ -83,7 +83,7 @@ class LiveRuntimeTest(unittest.TestCase):
 
     def test_arrive_by_large_many_to_one_matrix(self) -> None:
         result = self.city.matrix(
-            {f"student_{i}": "A" for i in range(1024)}, {"school": "B"},
+            {f"point_{i}": "A" for i in range(1024)}, {"hub": "B"},
             arrive_by="08:30", service_date="2026-07-15", max_walk_km=0.2,
         )
         stream = self.city._streams["2026-07-15"]
@@ -109,6 +109,13 @@ class LiveRuntimeTest(unittest.TestCase):
                     self.assertLessEqual(route.value["transfers"], cap if cap is not None else 31)
                     field = "departMinutes" if "arrive_by" in time else "arriveMinutes"
                     self.assertAlmostEqual(route.value[field], matrix.rows[0][field], delta=0.001)
+                detailed = self.city.matrix({"a": "A"}, {"b": "B"}, include_journeys=True, **options)
+                self.assertEqual(matrix.rows[0]["status"], detailed.rows[0]["status"])
+                if route.status == "ready":
+                    journey = detailed.rows[0]["journey"]
+                    for field in ("departMinutes", "arriveMinutes", "walkMinutes", "transfers"):
+                        self.assertAlmostEqual(route.value[field], journey[field], delta=0.003)
+                    self.assertTrue(journey["legs"])
 
     def test_reach_replacement_and_compare(self) -> None:
         options = {

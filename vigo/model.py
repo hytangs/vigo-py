@@ -115,6 +115,8 @@ class Matrix:
     max_distance_km: float | None = None
     objective: str = "earliest_arrival"
     max_transfers: int | None = None
+    include_journeys: bool = False
+    include_geometry: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -644,6 +646,13 @@ class City:
             if query.objective != "earliest_arrival":
                 return Support(False, "objective", ("earliest_arrival",))
             capability = self._query_capability("matrix" if isinstance(query, Matrix) else "route")
+            if isinstance(query, Matrix):
+                if type(query.include_journeys) is not bool or type(query.include_geometry) is not bool:
+                    return Support(False, "include_journeys", ("boolean",))
+                if query.include_geometry and not query.include_journeys:
+                    return Support(False, "include_geometry", ("include_journeys=True",))
+                if query.include_journeys and (query.mode != "transit" or not capability.get("journeys")):
+                    return Support(False, "matrix_journeys", ("transit runtime with journey support",))
             if query.max_transfers is not None and not capability.get("maxTransfers"):
                 return Support(False, "max_transfers_runtime", ("runtime with maxTransfers support",))
             if (
@@ -862,6 +871,8 @@ class City:
             "mode": query.mode,
             "objective": query.objective,
             "horizonMinutes": query.horizon_minutes,
+            "includeJourneys": query.include_journeys,
+            "includeGeometry": query.include_geometry,
             "walkSpeedKph": query.walk_speed_kph,
             **(
                 {"maxDistanceKm": query.max_distance_km}
