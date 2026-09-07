@@ -9,6 +9,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 import vigo
 
@@ -30,8 +31,15 @@ if args == ["capabilities"]:
         "productVersion": "0.3.7",
         "apiVersion": "1.1",
         "cityFormatVersion": 1,
+        "city": {"privateAccess": ["public", "endpoints"]},
         "resultSchemaVersion": 1,
         "publicCliCommands": ["build", "capabilities", "inspect", "route", "matrix", "reach", "compare"],
+        "queries": [
+            {"id": "route", "maxTransfers": {"min": 0, "max": 31, "default": None}},
+            {"id": "matrix", "resident": True,
+             "maxTransfers": {"min": 0, "max": 31, "default": None},
+             "time": {"available": ["depart_at", "arrive_by"]}},
+        ],
     }))
     raise SystemExit
 
@@ -47,6 +55,7 @@ if command == "build":
         "schemaVersion": "vigo.city.v1",
         "cityFormatVersion": 1,
         "name": "built-city",
+        "privateAccess": options.get("private-access", "public"),
         "revisionId": "20260904T120000-001Z",
         "builtAt": "2026-09-04T12:00:00.000Z",
         "sources": {"gtfs": [{"name": "feed.zip"}], "osm": {"name": "region.osm.pbf"}},
@@ -56,9 +65,22 @@ if command == "build":
 elif command == "_route-stream":
     for line in sys.stdin:
         request = json.loads(line)
+        if request.get("kind") == "matrix":
+            rows = [{
+                "originIndex": i, "destinationIndex": j,
+                "originId": origin["id"], "destinationId": destination["id"],
+                "status": "ready", "durationMinutes": 10 + i + j,
+            } for i, origin in enumerate(request["origins"]) for j, destination in enumerate(request["destinations"])]
+            print(json.dumps({
+                "schemaVersion": "vigo.result.matrix.v1", "productVersion": "0.3.7",
+                "apiVersion": "1.1", "resultSchemaVersion": 1, "id": request["id"],
+                "kind": "matrix", "status": "ready", "query": request, "rows": rows,
+                "warnings": [], "timing": {"computeMs": 1.0},
+            }), flush=True)
+            continue
         unexpected = set(request) - {
             "id", "origin", "destination", "mode", "time", "timePreference",
-            "objective", "maxWalkKm", "departureWindowMinutes", "waypoints",
+            "objective", "maxWalkKm", "maxTransfers", "departureWindowMinutes", "waypoints",
         }
         if unexpected:
             raise SystemExit(f"unexpected route fields: {sorted(unexpected)}")
@@ -94,6 +116,8 @@ elif command == "route":
     }))
 elif command == "matrix":
     request = json.loads(pathlib.Path(options["request"]).read_text())
+    request["timePreference"] = options["time-preference"]
+    request["time"] = options["time"]
     rows = []
     for origin_index, origin in enumerate(request["origins"]):
         for destination_index, destination in enumerate(request["destinations"]):
@@ -254,20 +278,74 @@ class VigoPythonTest(unittest.TestCase):
             self.assertTrue((output / "routing" / "project.sqlite").is_file())
             self.assertTrue((output / "osm" / "street-index.sqlite").is_file())
 
-    def test_support_is_introspection_not_exception_discovery(self) -> None:
+        authorized = self.root / "authorized-city"
+        with vigo.build(authorized, gtfs=gtfs, osm=osm, private_access="endpoints", runtime=self.command):
+            self.assertEqual(json.loads((authorized / "network.json").read_text())["privateAccess"], "endpoints")
+        with vigo.open(self.city_path, runtime=self.command) as city, patch.dict(city.runtime.capabilities, {"city": {}}):
+            with self.assertRaisesRegex(vigo.VigoError, "private endpoint access"):
+                vigo.build(self.root / "unsupported-city", gtfs=gtfs, osm=osm, private_access="endpoints", runtime=city.runtime)
+            self.assertFalse((self.root / "unsupported-city").exists())
+
+    def test_arrive_by_matrix_preserves_direction_time_and_large_origins(self) -> None:
         with vigo.open(self.city_path, runtime=self.command) as city:
             query = vigo.Matrix(
-                {"a": "A"},
+                {f"student_{i}": "A" for i in range(1024)},
                 {"b": "B"},
                 arrive_by="08:30",
                 service_date="2026-09-04",
             )
             support = city.supports(query)
-            self.assertFalse(support.supported)
-            self.assertEqual(support.reason, "arrive_by_matrix")
-            self.assertEqual(support.available, ("depart_at",))
-            with self.assertRaises(vigo.UnsupportedQuery):
-                city.run(query)
+            self.assertTrue(support.supported)
+            result = city.run(query)
+            self.assertEqual(len(result.rows), 1024)
+            self.assertEqual(result.query["timePreference"], "arrive")
+            self.assertEqual(result.query["time"], "08:30")
+            stream = city._streams["2026-09-04"]
+            city.matrix({"b": "B"}, {"a": "A"}, depart_at="15:00", service_date="2026-09-04")
+            city.route("A", "B", depart_at="08:00", service_date="2026-09-04")
+            self.assertIs(city._streams["2026-09-04"], stream)
+
+    def test_transfer_caps_preserve_zero_and_reject_invalid_values(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city:
+            for cap in (None, 0, 1, 31):
+                for query in (
+                    vigo.Route("A", "B", depart_at="08:00", service_date="2026-09-04", max_transfers=cap),
+                    vigo.Matrix({"a": "A"}, {"b": "B"}, arrive_by="08:30", service_date="2026-09-04", max_transfers=cap),
+                ):
+                    self.assertTrue(city.supports(query).supported)
+                    result = city.run(query)
+                    if cap is None:
+                        self.assertNotIn("maxTransfers", result.query)
+                    else:
+                        self.assertEqual(result.query["maxTransfers"], cap)
+            for cap in (-1, 32, 0.5, True, "1"):
+                for query in (vigo.Route("A", "B", max_transfers=cap), vigo.Matrix(["A"], ["B"], max_transfers=cap)):
+                    self.assertEqual(city.supports(query).reason, "max_transfers")
+                    with self.assertRaises(vigo.UnsupportedQuery):
+                        city.run(query)
+            self.assertFalse(city.supports(vigo.Route("A", "B", waypoints=["C"], max_transfers=1)).supported)
+
+    def test_older_runtime_rejects_new_options_and_keeps_departure_matrix(self) -> None:
+        with (
+            vigo.open(self.city_path, runtime=self.command) as city,
+            patch.dict(city.runtime.capabilities, {"queries": []}),
+        ):
+            for query in (
+                vigo.Route("A", "B", max_transfers=0),
+                vigo.Matrix(["A"], ["B"], max_transfers=1),
+                vigo.Matrix(["A"], ["B"], arrive_by="08:30"),
+            ):
+                self.assertFalse(city.supports(query).supported)
+                with self.assertRaises(vigo.UnsupportedQuery):
+                    city.run(query)
+            result = city.matrix(
+                {"a": "A"}, {"b": "B"}, depart_at="09:15",
+                service_date="2026-09-04", max_walk_km=0.7,
+            )
+            self.assertEqual(result.rows[0]["status"], "ready")
+            self.assertEqual(result.query["time"], "09:15")
+            self.assertEqual(result.query["maxWalkKm"], 0.7)
+            self.assertFalse(city._streams)
 
     def test_scenario_nested_values_are_immutable_and_serializable(self) -> None:
         stops = [{"coordinate": [0, 0]}, {"coordinate": [1, 1]}]

@@ -81,6 +81,35 @@ class LiveRuntimeTest(unittest.TestCase):
             matrix.export(Path(self.temporary.name) / "matrix.csv").read_text(),
         )
 
+    def test_arrive_by_large_many_to_one_matrix(self) -> None:
+        result = self.city.matrix(
+            {f"student_{i}": "A" for i in range(1024)}, {"school": "B"},
+            arrive_by="08:30", service_date="2026-07-15", max_walk_km=0.2,
+        )
+        stream = self.city._streams["2026-07-15"]
+        point = self.city.route("A", "B", arrive_by="08:30", service_date="2026-07-15", max_walk_km=0.2)
+        repeated = self.city.matrix({"a": "A"}, {"b": "B"}, depart_at="07:55", service_date="2026-07-15", max_walk_km=0.2)
+        self.assertIs(self.city._streams["2026-07-15"], stream)
+        self.assertEqual(repeated.timing["openMs"], 0)
+        self.assertEqual(result.query["timePreference"], "arrive")
+        self.assertEqual(len(result.rows), 1024)
+        for row in result.rows:
+            self.assertEqual(row["status"], "ready")
+            self.assertEqual(row["departMinutes"], point.value["departMinutes"])
+            self.assertEqual(row["arriveMinutes"], 510)
+
+    def test_transfer_caps_use_the_resident_runtime_in_both_directions(self) -> None:
+        for time in ({"depart_at": "07:55"}, {"arrive_by": "08:30"}):
+            for cap in (0, 1, None):
+                options = {**time, "service_date": "2026-07-15", "max_walk_km": 0.2, "max_transfers": cap}
+                route = self.city.route("A", "B", **options)
+                matrix = self.city.matrix({"a": "A"}, {"b": "B"}, **options)
+                self.assertEqual(route.status, matrix.rows[0]["status"])
+                if route.status == "ready":
+                    self.assertLessEqual(route.value["transfers"], cap if cap is not None else 31)
+                    field = "departMinutes" if "arrive_by" in time else "arriveMinutes"
+                    self.assertAlmostEqual(route.value[field], matrix.rows[0][field], delta=0.001)
+
     def test_reach_replacement_and_compare(self) -> None:
         options = {
             "depart_at": "07:55",

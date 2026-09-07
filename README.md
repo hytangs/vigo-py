@@ -81,6 +81,13 @@ with vigo.build(
 
 Pass `replace=True` only when you intend to replace an existing City.
 
+For travelers authorized to use internal roads at their own origin and destination,
+pass `private_access="endpoints"` to `vigo.build()`. The default is `"public"`.
+The endpoint model includes mapped private access walks within the walking budget;
+the public middle of a journey and transit transfers cannot use private shortcuts.
+It assumes endpoint authorization and does not infer ownership or gate hours.
+An older runtime that lacks this feature is rejected before Build.
+
 ## Route
 
 Route includes point-to-point, depart-at, arrive-by, departure-window, walking, driving, and batch use.
@@ -103,7 +110,14 @@ results = city.run(requests)
 
 `City.run(query)` and `Scenario.run(query)` are the execution primitives. `city.route(...)`, `city.matrix(...)`, and `city.reach(...)` are convenience constructors with exactly the same behavior.
 
-The 0.3.0 Route objective is explicit and singular: earliest arrival, then fewer boardings, then less walking, then a stable final order.
+Depart-at minimizes arrival time, then boardings, then walking. Arrive-by maximizes departure time; among journeys leaving at that boundary and arriving by the deadline, it minimizes boardings, then walking, then actual arrival.
+
+`Route` and `Matrix` accept `max_transfers=0` for at most one boarding,
+`max_transfers=1` for at most two, and so on through 31. Omit the option
+(or use `None`) for no additional cap. It applies to both `depart_at` and
+`arrive_by` and all Matrix shapes. A finite cap with ordered transit
+waypoints is currently unsupported. The runtime must advertise transfer-cap
+support; Python rejects this option on older runtimes instead of ignoring it.
 
 Repeated transit Route calls reuse an open process for the selected service date. Each open City keeps a bounded pool of one to four processes, according to available CPU and memory. Switching dates reclaims the least recently used idle process; active queries finish before their process is closed. Route answers themselves are recomputed.
 
@@ -127,6 +141,21 @@ for row in matrix.rows:
 ```
 
 Use `mode="walk"` or `mode="drive"` for street matrices.
+
+Transit supports both `depart_at` and `arrive_by` with one-to-many, many-to-one,
+or many-to-many endpoint sets, up to 100,000 pairs per request. For a morning
+school trip, use `city.matrix(assigned_homes, {"school": school},
+arrive_by="08:30", service_date="2026-07-15")`; for dismissal, reverse the
+endpoint sets and use `depart_at="15:00"`. Each shares one Rust timetable scan.
+Arrive-by rows report the latest `departMinutes` and the deadline as
+`arriveMinutes`; `durationMinutes` includes waiting after early arrival.
+Use Route to obtain actual itinerary arrival and legs. This requires a VIGO
+runtime whose Matrix capabilities include `arrive_by`.
+Successive Matrix and transit Route queries on the same City and service date
+reuse one resident process. Keep the City open while iterating over schools so
+the network is loaded once. Closing the City releases those processes. Older
+runtimes retain their one-shot depart-at Matrix execution; Python rejects
+arrive-by Matrix when the runtime does not advertise it.
 
 ## Reach
 

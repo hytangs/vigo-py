@@ -38,11 +38,16 @@ VIGO has exactly three Query families.
 
 Find and explain travel between ordered points. Transport mode, depart-at, arrive-by, departure windows, waypoints, and batch requests are Route options.
 
-VIGO 0.3.0 exposes one Route objective: earliest arrival. Ties prefer fewer boardings, then less walking, then a stable final order.
+Depart-at minimizes arrival time, then boardings, then walking. Arrive-by maximizes departure time, then minimizes boardings and walking among journeys arriving by the deadline, then actual arrival.
 
 ### Matrix
 
 Compute scalar travel time between one or more origins and destinations.
+
+Both depart-at and arrive-by accept up to 100,000 pairs. Fixed departures share
+one forward scan per unique origin; fixed arrival deadlines share one reverse
+scan per unique destination. Arrive-by duration runs from the latest departure
+to the deadline, including destination waiting.
 
 ### Reach
 
@@ -90,3 +95,9 @@ with vigo.open("./city") as city:
 The VIGO command line uses the same nouns: `vigo build`, `vigo inspect`, `vigo route`, `vigo matrix`, `vigo reach`, and `vigo compare`.
 
 `vigo capabilities` reports the public API version and supported combinations. Python accepts a compatible API major version; it does not require the same product patch version.
+
+`Route` and `Matrix` accept `max_transfers=0` for at most one boarding,
+`max_transfers=1` for at most two, and so on through 31. Omit the option
+(or use `None`) for no additional cap. It applies to both `depart_at` and
+`arrive_by` and all Matrix shapes. A finite cap with ordered transit
+waypoints is currently unsupported.

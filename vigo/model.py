@@ -98,6 +98,7 @@ class Route:
     max_walk_km: float = 1.2
     departure_window_minutes: int = 0
     objective: str = "earliest_arrival"
+    max_transfers: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +114,7 @@ class Matrix:
     walk_speed_kph: float = 4.8
     max_distance_km: float | None = None
     objective: str = "earliest_arrival"
+    max_transfers: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -620,14 +622,35 @@ class City:
     def supports(self, query: Query) -> Support:
         return self._support(query, None)
 
+    def _query_capability(self, kind: str) -> Mapping[str, Any]:
+        return next(
+            (entry for entry in self.runtime.capabilities.get("queries", ())
+             if entry.get("id") == kind),
+            {},
+        )
+
     def _support(self, query: Query, scenario: Scenario | None) -> Support:
         if not isinstance(query, (Route, Matrix, Reach)):
             raise InvalidQuery("query must be Route, Matrix, or Reach")
         if isinstance(query, (Route, Matrix)):
             if query.mode not in {"transit", "walk", "drive"}:
                 raise InvalidQuery("mode must be transit, walk, or drive")
+            if query.max_transfers is not None and (
+                type(query.max_transfers) is not int or not 0 <= query.max_transfers <= 31
+            ):
+                return Support(False, "max_transfers", ("integers from 0 to 31",))
+            if isinstance(query, Route) and query.mode == "transit" and query.waypoints and query.max_transfers is not None:
+                return Support(False, "max_transfers_with_waypoints", ("Route without waypoints",))
             if query.objective != "earliest_arrival":
                 return Support(False, "objective", ("earliest_arrival",))
+            capability = self._query_capability("matrix" if isinstance(query, Matrix) else "route")
+            if query.max_transfers is not None and not capability.get("maxTransfers"):
+                return Support(False, "max_transfers_runtime", ("runtime with maxTransfers support",))
+            if (
+                isinstance(query, Matrix) and query.arrive_by is not None
+                and "arrive_by" not in capability.get("time", {}).get("available", ())
+            ):
+                return Support(False, "arrive_by_matrix", ("depart_at",))
         if (
             isinstance(query, Route)
             and query.depart_at is not None
@@ -640,8 +663,6 @@ class City:
             and query.arrive_by is not None
         ):
             raise InvalidQuery("choose depart_at or arrive_by, not both")
-        if isinstance(query, Matrix) and query.arrive_by is not None:
-            return Support(False, "arrive_by_matrix", ("depart_at",))
         if scenario is None:
             return Support(True)
 
@@ -765,6 +786,7 @@ class City:
             "timePreference": "arrive" if query.arrive_by is not None else "depart",
             "objective": query.objective,
             "maxWalkKm": query.max_walk_km,
+            **({"maxTransfers": query.max_transfers} if query.max_transfers is not None else {}),
             "departureWindowMinutes": query.departure_window_minutes,
             **(
                 {"traffic": _thaw(scenario.traffic)}
@@ -826,8 +848,15 @@ class City:
         )
 
     def _matrix(self, query: Matrix, scenario: Scenario | None) -> Result:
-        clock, service_date = _clock(query.depart_at or "08:00", query.service_date)
+        selected_time = query.arrive_by if query.arrive_by is not None else query.depart_at
+        clock, service_date = _clock(selected_time or "08:00", query.service_date)
+        started = time.perf_counter()
         request = {
+            "kind": "matrix",
+            "time": clock,
+            "timePreference": "arrive" if query.arrive_by is not None else "depart",
+            "maxWalkKm": query.max_walk_km,
+            **({"maxTransfers": query.max_transfers} if query.max_transfers is not None else {}),
             "origins": _point_rows(query.origins, "origin"),
             "destinations": _point_rows(query.destinations, "destination"),
             "mode": query.mode,
@@ -845,20 +874,20 @@ class City:
                 else {}
             ),
         }
-        payload = _json_command(
-            self.runtime,
-            self.path,
-            "matrix",
-            request,
-            [
-                f"--mode={query.mode}",
-                f"--time={clock}",
-                f"--service-date={service_date}",
-                f"--max-walk={query.max_walk_km:g}",
-                f"--horizon={query.horizon_minutes:g}",
-                f"--objective={query.objective}",
-            ],
-            self.timeout,
+        if self._query_capability("matrix").get("resident"):
+            with self._stream(service_date) as stream:
+                payload = stream.route(request)
+        else:
+            payload = _json_command(
+                self.runtime, self.path, "matrix", request,
+                [f"--mode={query.mode}", f"--time={clock}",
+                 f"--time-preference={request['timePreference']}",
+                 f"--service-date={service_date}", f"--max-walk={query.max_walk_km:g}",
+                 f"--horizon={query.horizon_minutes:g}", f"--objective={query.objective}"],
+                self.timeout,
+            )
+        payload.setdefault("timing", {})["endToEndMs"] = round(
+            (time.perf_counter() - started) * 1000, 3
         )
         return Result(
             "matrix",
@@ -1055,6 +1084,7 @@ def build(
     *,
     gtfs: str | os.PathLike[str] | Sequence[str | os.PathLike[str]],
     osm: str | os.PathLike[str],
+    private_access: str = "public",
     replace: bool = False,
     runtime: RuntimeInfo | str | os.PathLike[str] | Sequence[str] | None = None,
     timeout: float = 1_800.0,
@@ -1066,10 +1096,15 @@ def build(
     if not sources:
         raise ValueError("at least one GTFS ZIP is required")
     runtime_info = resolve_runtime(runtime)
+    if private_access not in {"public", "endpoints"}:
+        raise ValueError("private_access must be public or endpoints")
+    if private_access == "endpoints" and "endpoints" not in runtime_info.capabilities.get("city", {}).get("privateAccess", ()):
+        raise VigoError("This runtime does not support authorized private endpoint access.")
     arguments = [
         "build",
         *(f"--gtfs={Path(source).expanduser().resolve()}" for source in sources),
         f"--osm={Path(osm).expanduser().resolve()}",
+        *(["--private-access=endpoints"] if private_access == "endpoints" else []),
         f"--output={output_path}",
         *(["--replace"] if replace else []),
     ]
