@@ -99,6 +99,9 @@ class Route:
     departure_window_minutes: int = 0
     objective: str = "earliest_arrival"
     max_transfers: int | None = None
+    require_transit_ride: bool = True
+    horizon_minutes: float = 480
+    disable_cache: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +120,8 @@ class Matrix:
     max_transfers: int | None = None
     include_journeys: bool = False
     include_geometry: bool = False
+    require_transit_ride: bool = True
+    disable_cache: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,9 +334,9 @@ class _RouteStream:
                 raise VigoError("VIGO route process is not running")
             self._sequence += 1
             request_id = f"python_{self._sequence}"
-            message = {"id": request_id, **copy.deepcopy(dict(request))}
+            message = {**request, "id": request_id}
             assert self._process.stdin is not None
-            encoded = json.dumps(message, allow_nan=False) + "\n"
+            encoded = json.dumps(message, allow_nan=False, separators=(",", ":")) + "\n"
             try:
                 self._process.stdin.write(encoded)
                 self._process.stdin.flush()
@@ -444,13 +449,13 @@ class Result:
 
     @property
     def duration_minutes(self) -> float | None:
-        route = self.value if self.kind == "route" else None
+        route = self._payload.get("result", self._payload.get("plan")) if self.kind == "route" else None
         value = route.get("durationMinutes") if isinstance(route, Mapping) else None
         return None if value is None else float(value)
 
     @property
     def legs(self) -> tuple[dict[str, Any], ...]:
-        route = self.value if self.kind == "route" else None
+        route = self._payload.get("result", self._payload.get("plan")) if self.kind == "route" else None
         return (
             tuple(copy.deepcopy(leg) for leg in route.get("legs", ()))
             if isinstance(route, Mapping)
@@ -472,7 +477,8 @@ class Result:
         return copy.deepcopy(dict(self._payload))
 
     def to_json(self, *, indent: int | None = 2) -> str:
-        return json.dumps(self.to_dict(), indent=indent, allow_nan=False)
+        return json.dumps(dict(self._payload), indent=indent, allow_nan=False,
+                          separators=(",", ":") if indent is None else None)
 
     def to_geojson(self) -> dict[str, Any]:
         if self.kind == "reach":
@@ -482,7 +488,8 @@ class Result:
             )
         if self.kind == "route":
             features = []
-            for index, leg in enumerate(self.legs):
+            route = self._payload.get("result", self._payload.get("plan")) or {}
+            for index, leg in enumerate(route.get("legs", ())):
                 coordinates = leg.get("coordinates")
                 if isinstance(coordinates, list) and len(coordinates) >= 2:
                     features.append(
@@ -491,7 +498,7 @@ class Result:
                             "properties": {"index": index, "type": leg.get("type")},
                             "geometry": {
                                 "type": "LineString",
-                                "coordinates": coordinates,
+                                "coordinates": copy.deepcopy(coordinates),
                             },
                         }
                     )
@@ -501,14 +508,11 @@ class Result:
     def export(self, path: str | os.PathLike[str]) -> Path:
         destination = Path(path).expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.suffix.lower() in {".geojson", ".json"}:
-            value = (
-                self.to_geojson()
-                if destination.suffix.lower() == ".geojson"
-                else self.to_dict()
-            )
+        if destination.suffix.lower() == ".json":
+            destination.write_text(self.to_json() + "\n", encoding="utf-8")
+        elif destination.suffix.lower() == ".geojson":
             destination.write_text(
-                json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+                json.dumps(self.to_geojson(), indent=2, allow_nan=False) + "\n", encoding="utf-8"
             )
         elif destination.suffix.lower() == ".csv" and self.kind == "matrix":
             rows = list(self.rows)
@@ -635,6 +639,12 @@ class City:
         if not isinstance(query, (Route, Matrix, Reach)):
             raise InvalidQuery("query must be Route, Matrix, or Reach")
         if isinstance(query, (Route, Matrix)):
+            if type(query.disable_cache) is not bool:
+                raise InvalidQuery("disable_cache must be boolean")
+            if type(query.require_transit_ride) is not bool:
+                raise InvalidQuery("require_transit_ride must be boolean")
+            if not _finite(query.horizon_minutes) or not 1 <= query.horizon_minutes <= 2880:
+                raise InvalidQuery("horizon_minutes must be finite and between 1 and 2880")
             if query.mode not in {"transit", "walk", "drive"}:
                 raise InvalidQuery("mode must be transit, walk, or drive")
             if query.max_transfers is not None and (
@@ -646,6 +656,8 @@ class City:
             if query.objective != "earliest_arrival":
                 return Support(False, "objective", ("earliest_arrival",))
             capability = self._query_capability("matrix" if isinstance(query, Matrix) else "route")
+            if query.disable_cache and (query.mode != "transit" or not capability.get("transitStreetCacheControl")):
+                return Support(False, "disable_cache", ("transit runtime with street cache control",))
             if isinstance(query, Matrix):
                 if type(query.include_journeys) is not bool or type(query.include_geometry) is not bool:
                     return Support(False, "include_journeys", ("boolean",))
@@ -795,6 +807,9 @@ class City:
             "timePreference": "arrive" if query.arrive_by is not None else "depart",
             "objective": query.objective,
             "maxWalkKm": query.max_walk_km,
+            "requireTransitRide": query.require_transit_ride,
+            "horizonMinutes": query.horizon_minutes,
+            "disableCache": query.disable_cache,
             **({"maxTransfers": query.max_transfers} if query.max_transfers is not None else {}),
             "departureWindowMinutes": query.departure_window_minutes,
             **(
@@ -851,7 +866,7 @@ class City:
         )
         return Result(
             "route",
-            _immutable(payload),
+            MappingProxyType(payload),
             self.revision_id,
             scenario.name if scenario else None,
         )
@@ -862,6 +877,8 @@ class City:
         started = time.perf_counter()
         request = {
             "kind": "matrix",
+            "requireTransitRide": query.require_transit_ride,
+            "disableCache": query.disable_cache,
             "time": clock,
             "timePreference": "arrive" if query.arrive_by is not None else "depart",
             "maxWalkKm": query.max_walk_km,
@@ -902,7 +919,7 @@ class City:
         )
         return Result(
             "matrix",
-            _immutable(payload),
+            MappingProxyType(payload),
             self.revision_id,
             scenario.name if scenario else None,
         )
@@ -946,7 +963,7 @@ class City:
         )
         return Result(
             "reach",
-            _immutable(payload),
+            MappingProxyType(payload),
             self.revision_id,
             scenario.name if scenario else None,
         )

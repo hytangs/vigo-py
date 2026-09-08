@@ -35,8 +35,9 @@ if args == ["capabilities"]:
         "resultSchemaVersion": 1,
         "publicCliCommands": ["build", "capabilities", "inspect", "route", "matrix", "reach", "compare"],
         "queries": [
-            {"id": "route", "maxTransfers": {"min": 0, "max": 31, "default": None}},
+            {"id": "route", "transitStreetCacheControl": True, "maxTransfers": {"min": 0, "max": 31, "default": None}},
             {"id": "matrix", "resident": True, "journeys": True,
+             "transitStreetCacheControl": True,
              "maxTransfers": {"min": 0, "max": 31, "default": None},
              "time": {"available": ["depart_at", "arrive_by"]}},
         ],
@@ -81,6 +82,7 @@ elif command == "_route-stream":
         unexpected = set(request) - {
             "id", "origin", "destination", "mode", "time", "timePreference",
             "objective", "maxWalkKm", "maxTransfers", "departureWindowMinutes", "waypoints",
+            "requireTransitRide", "horizonMinutes", "disableCache",
         }
         if unexpected:
             raise SystemExit(f"unexpected route fields: {sorted(unexpected)}")
@@ -223,6 +225,41 @@ class VigoPythonTest(unittest.TestCase):
         self.assertEqual(len(matrix.rows), 4)
         self.assertEqual(reach.to_geojson()["type"], "FeatureCollection")
         self.assertEqual(route.city_revision_id, "20260904T120000-001Z")
+
+    def test_result_exports_do_not_mutate_retained_route(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city:
+            route = city.route("A", "B", depart_at="08:00", service_date="2026-09-04")
+        expected = route.to_dict()
+        value = route.value
+        value["durationMinutes"] = -1
+        value.setdefault("legs", []).append({"type": "invalid"})
+        exported = route.to_dict()
+        exported["result"] = None
+        route.query["origin"] = "changed"
+        route.timing["computeMs"] = -1
+        route.to_geojson()["features"][0]["geometry"]["coordinates"][0][0] = 99
+        self.assertEqual(route.to_dict(), expected)
+        self.assertEqual(json.loads(route.to_json(indent=None)), expected)
+        self.assertEqual(json.loads(route.export(self.root / "route.json").read_text()), expected)
+        self.assertEqual(route.duration_minutes, 12.5)
+
+    def test_transit_policy_and_horizon_are_query_parameters(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city:
+            route = city.route("A", "B", depart_at="08:00", service_date="2026-09-04",
+                               require_transit_ride=False, horizon_minutes=120, disable_cache=True)
+            self.assertFalse(route.query["requireTransitRide"])
+            self.assertEqual(route.query["horizonMinutes"], 120)
+            self.assertTrue(route.query["disableCache"])
+            matrix = city.matrix(["A"], ["B"], service_date="2026-09-04", disable_cache=True)
+            self.assertTrue(matrix.query["disableCache"])
+            with self.assertRaises(vigo.InvalidQuery):
+                city.route("A", "B", disable_cache="true")
+            with patch.dict(city.runtime.capabilities, {"queries": []}):
+                self.assertFalse(city.supports(vigo.Route("A", "B", disable_cache=True)).supported)
+            with self.assertRaises(vigo.InvalidQuery):
+                city.route("A", "B", require_transit_ride="false")
+            with self.assertRaises(vigo.InvalidQuery):
+                city.route("A", "B", horizon_minutes=float("nan"))
 
     def test_scenario_is_tied_to_one_city_revision(self) -> None:
         with vigo.open(self.city_path, runtime=self.command) as city:

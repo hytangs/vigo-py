@@ -16,3 +16,5 @@ City -> Scenario -> Route | Matrix | Reach -> Result
 - Added one Result shape, local comparison, export, and background jobs.
 - Removed the Python pass-through command and runtime installer. VIGO Studio and the VIGO command line are installed independently.
 - Bound the per-City resident Route process pool and reclaim idle dates automatically. Queries retain their process until completion; closing a City waits for active Route calls.
+- Add transit requirements, search horizons, transfer caps, and optional Matrix journeys, including arrive-by and shared many-to-one queries.
+- Add `disable_cache` to Route and Matrix for transit street-access and path measurements. Keep result accessors independent while avoiding redundant copies during result construction and JSON/GeoJSON export.

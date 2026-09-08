@@ -121,6 +121,12 @@ support; Python rejects this option on older runtimes instead of ignoring it.
 
 Repeated transit Route calls reuse an open process for the selected service date. Each open City keeps a bounded pool of one to four processes, according to available CPU and memory. Switching dates reclaims the least recently used idle process; active queries finish before their process is closed. Route answers themselves are recomputed.
 
+For transit Route and Matrix measurements, `disable_cache=True` disables
+street-access frontier and reconstructed walking-path caches. It keeps the
+prepared City resident. Python requires the runtime to advertise this control;
+older runtimes are rejected instead of silently ignoring it. `Result.to_json(indent=None)`
+returns compact JSON, including the complete itinerary and geometry.
+
 ## Matrix
 
 One origin and many origins use the same method:
@@ -268,3 +274,5 @@ python -m mypy vigo
 ```
 
 VIGO Python is licensed under the [Apache License 2.0](LICENSE).
+
+Transit Route and Matrix require a vehicle boarding by default. Use `mode="walk"` for a walking journey, or explicitly set `require_transit_ride=False` to allow walk-only comparisons. `horizon_minutes` sets the transit search horizon (1–2880 minutes; default 480). Result properties return independent copies; `to_json(indent=None)` serializes directly without an intermediate full-result copy.

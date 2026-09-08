@@ -81,6 +81,18 @@ class LiveRuntimeTest(unittest.TestCase):
             matrix.export(Path(self.temporary.name) / "matrix.csv").read_text(),
         )
 
+    def test_transit_cache_control_reaches_native_paths(self) -> None:
+        options = {"depart_at": "07:55", "service_date": "2026-07-15", "max_walk_km": 0.2}
+        cached = self.city.route("A", "B", **options)
+        uncached = self.city.route("A", "B", disable_cache=True, **options)
+        self.assertEqual(cached.duration_minutes, uncached.duration_minutes)
+        stats = uncached.value["diagnostics"]["searchStats"]
+        self.assertTrue(stats["nativeStreetPathCacheDisabled"])
+        self.assertEqual(stats["nativeStreetPathCacheHits"], 0)
+        matrix = self.city.matrix({"a": "A"}, {"b": "B"}, disable_cache=True,
+                                  include_journeys=True, include_geometry=True, **options)
+        self.assertEqual(matrix.rows[0]["durationMinutes"], uncached.duration_minutes)
+
     def test_arrive_by_large_many_to_one_matrix(self) -> None:
         result = self.city.matrix(
             {f"point_{i}": "A" for i in range(1024)}, {"hub": "B"},
