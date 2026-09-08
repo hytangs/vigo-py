@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Preserve native plan JSON for compact Result export, avoiding repeated geometry encoding while keeping independently mutable Python exports and compatibility with older runtimes.
+
 ## 0.3.0
 
 VIGO 0.3 unifies the product around one model:

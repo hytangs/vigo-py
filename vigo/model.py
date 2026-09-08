@@ -310,10 +310,19 @@ class _RouteStream:
 
     def _read(self) -> None:
         assert self._process.stdout is not None
+        decoder = json.JSONDecoder()
         try:
             for line in self._process.stdout:
                 try:
-                    value = json.loads(line)
+                    if line.startswith('{"plan":'):
+                        # Decode the native plan once. Its retained JSON can be
+                        # exported without re-encoding every geometry number.
+                        plan, end = decoder.raw_decode(line, len('{"plan":'))
+                        value = json.loads("{" + line[end + 1:])
+                        value["plan"] = plan
+                        value["_plan_json"] = line[len('{"plan":'):end]
+                    else:
+                        value = json.loads(line)
                     if not isinstance(value, dict):
                         raise TypeError("route stream returned a non-object")
                     self._responses.put(value)
@@ -406,6 +415,7 @@ class Result:
     _payload: Mapping[str, Any] = field(repr=False)
     city_revision_id: str | None
     scenario_name: str | None = None
+    _plan_json: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self._payload.get("resultSchemaVersion") != RESULT_SCHEMA_VERSION:
@@ -477,6 +487,10 @@ class Result:
         return copy.deepcopy(dict(self._payload))
 
     def to_json(self, *, indent: int | None = 2) -> str:
+        if indent is None and self._plan_json is not None:
+            envelope = {key: value for key, value in self._payload.items() if key != "result"}
+            encoded = json.dumps(envelope, allow_nan=False, separators=(",", ":"))
+            return encoded[:-1] + ',"result":' + self._plan_json + "}"
         return json.dumps(dict(self._payload), indent=indent, allow_nan=False,
                           separators=(",", ":") if indent is None else None)
 
@@ -794,6 +808,7 @@ class City:
 
     def _route(self, query: Route, scenario: Scenario | None) -> Result:
         started = time.perf_counter()
+        plan_json = None
         selected_time = (
             query.arrive_by if query.arrive_by is not None else query.depart_at
         )
@@ -822,6 +837,7 @@ class City:
             with self._stream(service_date) as stream:
                 response = stream.route(request)
             timing = response.get("timing", {})
+            plan_json = response.get("_plan_json")
             payload = {
                 "schemaVersion": "vigo.result.route.v1",
                 "productVersion": self.runtime.product_version,
@@ -869,6 +885,7 @@ class City:
             MappingProxyType(payload),
             self.revision_id,
             scenario.name if scenario else None,
+            _plan_json=plan_json,
         )
 
     def _matrix(self, query: Matrix, scenario: Scenario | None) -> Result:

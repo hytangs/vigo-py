@@ -92,7 +92,7 @@ elif command == "_route-stream":
             "transfers": 0,
             "legs": [{"type": "ride", "coordinates": [[0, 0], [1, 1]]}],
         }
-        print(json.dumps({
+        response = {
             "schemaVersion": "vigo.result.route.v1",
             "productVersion": "0.3.7",
             "apiVersion": "1.1",
@@ -102,7 +102,13 @@ elif command == "_route-stream":
             "routingStatus": "ready",
             "plan": plan,
             "timing": {"requestMs": 1.0},
-        }), flush=True)
+        }
+        if request["origin"] == "JSON":
+            plan["title"] = 'Station \u2014 \u5317 "A"'
+            response = {"plan": plan, **response}
+            print(json.dumps(response, ensure_ascii=False, separators=(",", ":")), flush=True)
+        else:
+            print(json.dumps(response), flush=True)
 elif command == "route":
     print(json.dumps({
         "schemaVersion": "vigo.result.route.v1",
@@ -242,6 +248,21 @@ class VigoPythonTest(unittest.TestCase):
         self.assertEqual(json.loads(route.to_json(indent=None)), expected)
         self.assertEqual(json.loads(route.export(self.root / "route.json").read_text()), expected)
         self.assertEqual(route.duration_minutes, 12.5)
+
+    def test_native_plan_json_survives_export_and_independent_mutation(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city:
+            route = city.route("JSON", "B", depart_at="08:00", service_date="2026-09-04")
+            legacy = city.route("A", "B", depart_at="08:00", service_date="2026-09-04")
+        self.assertIsNotNone(route._plan_json)
+        self.assertIsNone(legacy._plan_json)
+        expected = route.to_dict()
+        route.value["legs"][0]["coordinates"][0][0] = 99
+        route.legs[0]["coordinates"].clear()
+        route.to_dict()["result"]["title"] = "changed"
+        self.assertEqual(json.loads(route.to_json(indent=None)), expected)
+        self.assertEqual(json.loads(route.to_json()), expected)
+        self.assertIn('Station \u2014 \u5317', route.to_json(indent=None))
+        self.assertEqual(json.loads(legacy.to_json(indent=None)), legacy.to_dict())
 
     def test_transit_policy_and_horizon_are_query_parameters(self) -> None:
         with vigo.open(self.city_path, runtime=self.command) as city:
