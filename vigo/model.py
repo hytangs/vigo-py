@@ -594,17 +594,17 @@ class City:
 
     @property
     def revision_id(self) -> str | None:
-        value = self._manifest.get("revisionId") or self._manifest.get("createdAt")
+        value = self._manifest.get("revisionId")
         return None if value is None else str(value)
 
     @property
     def built_at(self) -> str | None:
-        value = self._manifest.get("builtAt") or self._manifest.get("createdAt")
+        value = self._manifest.get("builtAt")
         return None if value is None else str(value)
 
     @property
     def sources(self) -> dict[str, Any]:
-        value = self._manifest.get("sources") or self._manifest.get("inputs") or {}
+        value = self._manifest.get("sources") or {}
         return copy.deepcopy(dict(value))
 
     @property
@@ -673,6 +673,8 @@ class City:
             if query.disable_cache and (query.mode != "transit" or not capability.get("transitStreetCacheControl")):
                 return Support(False, "disable_cache", ("transit runtime with street cache control",))
             if isinstance(query, Matrix):
+                if not capability.get("resident"):
+                    return Support(False, "resident_matrix", ("runtime with resident Matrix support",))
                 if type(query.include_journeys) is not bool or type(query.include_geometry) is not bool:
                     return Support(False, "include_journeys", ("boolean",))
                 if query.include_geometry and not query.include_journeys:
@@ -919,18 +921,8 @@ class City:
                 else {}
             ),
         }
-        if self._query_capability("matrix").get("resident"):
-            with self._stream(service_date) as stream:
-                payload = stream.route(request)
-        else:
-            payload = _json_command(
-                self.runtime, self.path, "matrix", request,
-                [f"--mode={query.mode}", f"--time={clock}",
-                 f"--time-preference={request['timePreference']}",
-                 f"--service-date={service_date}", f"--max-walk={query.max_walk_km:g}",
-                 f"--horizon={query.horizon_minutes:g}", f"--objective={query.objective}"],
-                self.timeout,
-            )
+        with self._stream(service_date) as stream:
+            payload = stream.route(request)
         payload.setdefault("timing", {})["endToEndMs"] = round(
             (time.perf_counter() - started) * 1000, 3
         )

@@ -202,6 +202,30 @@ class VigoPythonTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_runtime_handshake_reuses_only_unchanged_files(self) -> None:
+        from vigo.runtime import _run
+
+        with patch("vigo.runtime._run", wraps=_run) as run:
+            first = vigo.resolve_runtime(self.command)
+            first.capabilities["queries"].clear()
+            second = vigo.resolve_runtime(self.command)
+            self.assertTrue(second.capabilities["queries"])
+            self.assertEqual(run.call_count, 1)
+            self.cli.write_text(self.cli.read_text().replace('"0.3.7"', '"0.3.8"'))
+            changed = vigo.resolve_runtime(self.command)
+            self.assertEqual(changed.product_version, "0.3.8")
+            self.assertEqual(run.call_count, 2)
+
+    def test_failed_runtime_handshake_is_not_cached(self) -> None:
+        from vigo.runtime import _run
+
+        with patch("vigo.runtime._run", side_effect=[vigo.VigoError("unavailable"),
+                                                   _run(self.command, "capabilities")]) as run:
+            with self.assertRaises(vigo.VigoError):
+                vigo.resolve_runtime(self.command)
+            self.assertEqual(vigo.resolve_runtime(self.command).product_version, "0.3.7")
+            self.assertEqual(run.call_count, 2)
+
     def test_city_has_one_query_model(self) -> None:
         with vigo.open(self.city_path, runtime=self.command) as city:
             route = city.route("A", "B", depart_at="08:00", service_date="2026-09-04")
@@ -389,7 +413,7 @@ class VigoPythonTest(unittest.TestCase):
                         city.run(query)
             self.assertFalse(city.supports(vigo.Route("A", "B", waypoints=["C"], max_transfers=1)).supported)
 
-    def test_older_runtime_rejects_new_options_and_keeps_departure_matrix(self) -> None:
+    def test_older_runtime_rejects_unsupported_queries(self) -> None:
         with (
             vigo.open(self.city_path, runtime=self.command) as city,
             patch.dict(city.runtime.capabilities, {"queries": []}),
@@ -403,13 +427,9 @@ class VigoPythonTest(unittest.TestCase):
                 self.assertFalse(city.supports(query).supported)
                 with self.assertRaises(vigo.UnsupportedQuery):
                     city.run(query)
-            result = city.matrix(
-                {"a": "A"}, {"b": "B"}, depart_at="09:15",
-                service_date="2026-09-04", max_walk_km=0.7,
-            )
-            self.assertEqual(result.rows[0]["status"], "ready")
-            self.assertEqual(result.query["time"], "09:15")
-            self.assertEqual(result.query["maxWalkKm"], 0.7)
+            with self.assertRaises(vigo.UnsupportedQuery):
+                city.matrix({"a": "A"}, {"b": "B"}, depart_at="09:15",
+                            service_date="2026-09-04", max_walk_km=0.7)
             self.assertFalse(city._streams)
 
     def test_scenario_nested_values_are_immutable_and_serializable(self) -> None:
@@ -595,20 +615,29 @@ class VigoPythonTest(unittest.TestCase):
     def test_studio_runtime_uses_the_packaged_electron_layout(self) -> None:
         from vigo.runtime import _command_environment
 
-        app = self.root.resolve() / "VIGO Studio.app"
-        executable = app / "Contents" / "MacOS" / "VIGO Studio"
-        program = app / "Contents" / "Resources" / "app" / "public" / "vigo.mjs"
-        for artifact in (executable, program):
-            artifact.parent.mkdir(parents=True, exist_ok=True)
-            artifact.touch()
-        runtime = vigo.resolve_runtime(app, verify=False)
-        self.assertEqual(runtime.command, (str(executable), str(program)))
-        environment = _command_environment(runtime.command)
-        self.assertEqual(environment["ELECTRON_RUN_AS_NODE"], "1")
-        self.assertEqual(
-            Path(environment["VIGO_NATIVE_ROUTING_KERNEL"]),
-            program.parent.parent / "server" / "vigo-routing-kernel.node",
-        )
+        for platform, executable_path, resources_path in (
+            ("mac", "Contents/MacOS/VIGO Studio", "Contents/Resources"),
+            ("windows", "VIGO Studio.exe", "resources"),
+            ("linux", "VIGO Studio", "resources"),
+        ):
+            with self.subTest(platform=platform):
+                app = self.root.resolve() / platform / "VIGO Studio.app"
+                executable = app / executable_path
+                program = app / resources_path / "app" / "public" / "vigo.mjs"
+                kernel = program.parent.parent / "server" / "vigo-routing-kernel.node"
+                for artifact in (executable, program, kernel):
+                    artifact.parent.mkdir(parents=True, exist_ok=True)
+                    artifact.touch()
+                for selected in (app, executable):
+                    runtime = vigo.resolve_runtime(selected, verify=False)
+                    self.assertEqual(runtime.command, (str(executable), str(program)))
+                    environment = _command_environment(runtime.command)
+                    self.assertEqual(environment["ELECTRON_RUN_AS_NODE"], "1")
+                    self.assertEqual(Path(environment["VIGO_NATIVE_ROUTING_KERNEL"]), kernel)
+                kernel.unlink()
+                for selected in (app, executable):
+                    with self.assertRaises(vigo.VigoError):
+                        vigo.resolve_runtime(selected, verify=False)
 
 
 if __name__ == "__main__":

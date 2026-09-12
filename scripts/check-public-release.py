@@ -48,15 +48,15 @@ def main() -> None:
                 problems.append(f"private value: {relative}")
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     runtime = (ROOT / "vigo" / "runtime.py").read_text(encoding="utf-8")
-    if 'name = "vigo"' not in pyproject or 'version = "0.3.0"' not in pyproject:
+    if 'name = "vigo"' not in pyproject or 'version = "0.3.1"' not in pyproject:
         problems.append("package name or version differs")
-    if 'VERSION = "0.3.0"' not in runtime:
+    if 'VERSION = "0.3.1"' not in runtime:
         problems.append("runtime version differs")
     if problems:
         raise SystemExit("\n".join(problems))
     print(
         json.dumps(
-            {"status": "passed", "files": len(public), "version": "0.3.0"}, indent=2
+            {"status": "passed", "files": len(public), "version": "0.3.1"}, indent=2
         )
     )
 

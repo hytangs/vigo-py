@@ -1,6 +1,6 @@
 # VIGO Python documentation
 
-Start with the [project README](../README.md), then use this map.
+Start with the [project README](../README.md), then use the [Python reference](reference.md) and [runtime guide](runtime.md).
 
 ## Concepts
 
@@ -58,4 +58,4 @@ A City is built from one or more static GTFS sources and one OSM PBF. Keep the c
 
 ## Runtime
 
-VIGO Python searches `VIGO_RUNTIME`, `VIGO_APP`, a sibling source build, installed VIGO apps, and then `vigo` on `PATH`. `resolve_runtime()` accepts a compatible API 1.x runtime; product patch versions do not need to match. Normal Query calls manage opening and reuse automatically.
+VIGO Python searches `VIGO_RUNTIME`, `VIGO_APP`, a sibling source build, installed VIGO apps, and then `vigo` on `PATH`. `resolve_runtime()` accepts a compatible API 1.x runtime; product patch versions do not need to match. Successful capability checks are reused until the selected runtime files change. Normal Query calls manage opening and reuse automatically. Matrix requires resident Matrix support.

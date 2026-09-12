@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
 import subprocess
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 API_VERSION = "1.0"
 CITY_FORMAT_VERSION = 1
 RESULT_SCHEMA_VERSION = 1
@@ -45,25 +47,38 @@ class RuntimeInfo:
 
 
 def _app_command(app: Path) -> tuple[str, ...] | None:
-    contents = app.expanduser().resolve() / "Contents"
-    executable = contents / "MacOS" / "VIGO Studio"
-    program = contents / "Resources" / "app" / "public" / "vigo.mjs"
-    if executable.is_file() and program.is_file():
-        return (str(executable), str(program))
+    app = app.expanduser().resolve()
+    executables = (
+        (app,) if app.is_file() else (
+            app / "Contents" / "MacOS" / "VIGO Studio",
+            app / "VIGO Studio.app" / "Contents" / "MacOS" / "VIGO Studio",
+            app / "VIGO Studio.exe",
+            app / "VIGO Studio",
+        )
+    )
+    for executable in executables:
+        resources = _app_resources(executable)
+        program = resources / "app" / "public" / "vigo.mjs"
+        kernel = resources / "app" / "server" / "vigo-routing-kernel.node"
+        if executable.is_file() and program.is_file() and kernel.is_file():
+            return (str(executable), str(program))
     return None
+
+
+def _app_resources(executable: Path) -> Path:
+    if executable.parent.name == "MacOS" and executable.parent.parent.name == "Contents":
+        return executable.parent.parent / "Resources"
+    return executable.parent / "resources"
 
 
 def _command_environment(command: Sequence[str]) -> dict[str, str]:
     environment = os.environ.copy()
     executable = Path(command[0])
-    if (
-        executable.parent.name == "MacOS"
-        and executable.parent.parent.name == "Contents"
-    ):
+    app_command = _app_command(executable)
+    if app_command and tuple(command[:2]) == app_command:
         environment["ELECTRON_RUN_AS_NODE"] = "1"
         environment["VIGO_NATIVE_ROUTING_KERNEL"] = str(
-            executable.parent.parent
-            / "Resources"
+            _app_resources(executable)
             / "app"
             / "server"
             / "vigo-routing-kernel.node"
@@ -73,9 +88,13 @@ def _command_environment(command: Sequence[str]) -> dict[str, str]:
 
 def _path_command(value: str | os.PathLike[str]) -> tuple[str, ...] | None:
     path = Path(value).expanduser()
-    if path.suffix == ".app" or path.is_dir() and path.name.endswith(".app"):
-        return _app_command(path)
+    if packaged := _app_command(path):
+        return packaged
+    if path.is_dir():
+        return None
     if path.is_file():
+        if path.name in {"VIGO Studio", "VIGO Studio.exe"}:
+            return None
         if path.suffix == ".mjs" and (node := shutil.which("node")):
             return (node, str(path.resolve()))
         return (str(path.resolve()),)
@@ -115,11 +134,13 @@ def _candidates(
     if sibling.is_file() and node:
         yield "checkout", (node, str(sibling))
 
-    for name in ("VIGO Studio.app", "VIGO.app"):
-        for app in (Path("/Applications") / name, Path.home() / "Applications" / name):
-            app_command = _app_command(app)
-            if app_command:
-                yield "studio", app_command
+    for app in (
+        Path("/Applications/VIGO Studio.app"),
+        Path.home() / "Applications/VIGO Studio.app",
+    ):
+        app_command = _app_command(app)
+        if app_command:
+            yield "studio", app_command
 
     installed = shutil.which("vigo")
     if installed:
@@ -151,6 +172,53 @@ def _compatible_api(value: object) -> bool:
         return False
 
 
+def _command_identity(command: tuple[str, ...]) -> tuple[tuple[object, ...], ...]:
+    identities = []
+    executable = shutil.which(command[0]) or command[0]
+    for part in (executable, *command[1:]):
+        path = Path(part)
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        identities.append(
+            (
+                str(path.resolve()),
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_size,
+                stat.st_mtime_ns,
+                stat.st_ctime_ns,
+            )
+        )
+    return tuple(identities)
+
+
+@lru_cache(maxsize=8)
+def _runtime_capabilities(
+    command: tuple[str, ...],
+    identity: tuple[tuple[object, ...], ...],
+) -> dict[str, Any]:
+    # The identity invalidates a successful handshake after a rebuild or upgrade.
+    response = _run(command, "capabilities")
+    try:
+        capabilities = json.loads(response.stdout) if response.returncode == 0 else None
+    except json.JSONDecodeError:
+        capabilities = None
+    if (
+        not isinstance(capabilities, dict)
+        or not _compatible_api(capabilities.get("apiVersion"))
+        or capabilities.get("cityFormatVersion") != CITY_FORMAT_VERSION
+        or capabilities.get("resultSchemaVersion") != RESULT_SCHEMA_VERSION
+        or not isinstance(capabilities.get("publicCliCommands"), list)
+        or any(
+            name not in capabilities["publicCliCommands"] for name in PUBLIC_COMMANDS
+        )
+    ):
+        raise VigoError("Runtime does not advertise a compatible VIGO API")
+    return capabilities
+
+
 def resolve_runtime(
     runtime: RuntimeInfo | str | os.PathLike[str] | Sequence[str] | None = None,
     *,
@@ -164,25 +232,11 @@ def resolve_runtime(
     for source, command in _candidates(runtime):
         if not verify:
             return RuntimeInfo("unknown", API_VERSION, source, command[-1], command, {})
-        response = _run(command, "capabilities")
         try:
-            capabilities = (
-                json.loads(response.stdout) if response.returncode == 0 else None
+            capabilities = copy.deepcopy(
+                _runtime_capabilities(command, _command_identity(command))
             )
-        except json.JSONDecodeError:
-            capabilities = None
-        if (
-            not isinstance(capabilities, dict)
-            or not _compatible_api(capabilities.get("apiVersion"))
-            or capabilities.get("cityFormatVersion") != CITY_FORMAT_VERSION
-            or capabilities.get("resultSchemaVersion") != RESULT_SCHEMA_VERSION
-        ):
-            failures.append(" ".join(command))
-            continue
-        commands = capabilities.get("publicCliCommands")
-        if not isinstance(commands, list) or any(
-            name not in commands for name in PUBLIC_COMMANDS
-        ):
+        except (OSError, VigoError):
             failures.append(" ".join(command))
             continue
         return RuntimeInfo(

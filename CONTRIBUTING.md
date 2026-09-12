@@ -1,6 +1,6 @@
-# Contributing to VIGO SDK
+# Contributing to VIGO Python
 
-VIGO SDK is the Python interface to VIGO. It must preserve the same City, Scenario, Route, Matrix, Reach, and Result model used by VIGO Studio and the command line.
+VIGO Python is the Python interface to VIGO. It must preserve the same City, Scenario, Route, Matrix, Reach, and Result model used by VIGO Studio and the command line.
 
 ## Before changing code
 
@@ -32,7 +32,7 @@ cd ../vigo-py
 VIGO_TEST_INPUTS=/tmp/vigo-python-fixture VIGO_RUNTIME=../vigo/public/vigo.mjs python -m unittest tests.test_live_runtime -v
 ```
 
-`VIGO_RUNTIME` can also point to a packaged `VIGO Studio.app` to verify the shipped runtime. This suite builds a City, compares Route and Matrix across all three modes, checks ordered arrive-by routing, runs Reach with a replacement Scenario, compares completed Results, and exports files. Ordinary wrapper CI skips it when the engine fixture is unavailable.
+`VIGO_RUNTIME` can also point to a complete packaged Studio directory or executable to verify the shipped runtime. This suite builds a City, compares Route and Matrix across all three modes, checks ordered arrive-by routing, runs Reach with a replacement Scenario, compares completed Results, and exports files. CI runs this fixture against packaged Engine builds on macOS, Linux, and Windows; local unit tests skip it when no fixture is configured.
 
 ## Pull requests
 

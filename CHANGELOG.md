@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 — 2026-09-11
+
+Stabilization release; public API and data schema versions remain unchanged.
+
+- Discover complete packaged runtimes on macOS, Linux, and Windows.
+- Test supported Python versions on all three operating systems and run public integration fixtures against packaged VIGO.
+
+- Explain reusable City packages, portable prepared state, and the distinction between reopening and rebuilding.
+- Reuse successful runtime capability checks until the executable or command file changes.
+- Require resident Matrix support and remove the old one-shot Matrix path.
+- Read current City metadata fields directly and remove automatic discovery of the retired VIGO.app name.
+- Keep installation and examples in this repository; expand the Python and runtime references.
 
 - Preserve native plan JSON for compact Result export, avoiding repeated geometry encoding while keeping independently mutable Python exports and compatibility with older runtimes.
 
