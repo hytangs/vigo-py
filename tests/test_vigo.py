@@ -18,6 +18,8 @@ import json
 import pathlib
 import sys
 
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
 args = sys.argv[1:]
 if args == ["--version"]:
     print("0.3.7")
@@ -201,6 +203,12 @@ class VigoPythonTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_runtime_output_is_utf8(self) -> None:
+        from vigo.runtime import _run
+
+        response = _run((sys.executable, "-c", "import sys; sys.stdout.buffer.write('北站'.encode('utf-8'))"))
+        self.assertEqual(response.stdout, "北站")
 
     def test_runtime_handshake_reuses_only_unchanged_files(self) -> None:
         from vigo.runtime import _run

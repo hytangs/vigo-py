@@ -37,6 +37,8 @@ jobs:
         run: python scripts/check-public-release.py
       - name: Build wheel
         run: python -m pip wheel --no-deps --wheel-dir dist .
+      - name: Check installed wheel
+        run: python scripts/check-wheel.py dist
 
   integration:
     runs-on: ${{ matrix.os }}
