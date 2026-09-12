@@ -52,9 +52,12 @@ _SERVICE_DAYS = {
 
 def _job_worker_count() -> int:
     cpu_limit = max(1, min(4, (os.cpu_count() or 2) // 2))
+    sysconf = getattr(os, "sysconf", None)
+    if sysconf is None:
+        return 1
     try:
-        physical_bytes = int(os.sysconf("SC_PHYS_PAGES")) * int(
-            os.sysconf("SC_PAGE_SIZE")
+        physical_bytes = int(sysconf("SC_PHYS_PAGES")) * int(
+            sysconf("SC_PAGE_SIZE")
         )
     except (AttributeError, OSError, TypeError, ValueError):
         return 1
