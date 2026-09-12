@@ -53,6 +53,9 @@ with vigo.build(
 ```
 
 Pass `replace=True` only when you intend to replace an existing City.
+Pass `progress=True` to show Build stages and elapsed time with the optional
+`tqdm` dependency. It defaults to `False`; see [Runtime and loading](runtime.md)
+for installation and separate raw-build, first-query, and reopening timings.
 
 For travelers authorized to use internal roads at their own origin and destination,
 pass `private_access="endpoints"` to `vigo.build()`. The default is `"public"`.

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add optional `vigo.build(..., progress=True)` stage and elapsed-time display through `tqdm`, including timeout and interruption cleanup.
+- Define raw Build, raw files to first answer, prepared-City reopening, and full Python query timing separately.
+
 ## 0.3.1 — 2026-09-11
 
 Stabilization release; public API and data schema versions remain unchanged.

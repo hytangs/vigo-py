@@ -28,6 +28,9 @@ Repository = "https://github.com/hytangs/vigo-py"
 Documentation = "https://github.com/hytangs/vigo-py/tree/main/docs"
 Issues = "https://github.com/hytangs/vigo-py/issues"
 
+[project.optional-dependencies]
+progress = ["tqdm>=4.66"]
+
 [tool.setuptools.packages.find]
 include = ["vigo*"]
 

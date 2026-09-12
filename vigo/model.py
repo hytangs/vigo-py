@@ -1129,6 +1129,7 @@ def build(
     replace: bool = False,
     runtime: RuntimeInfo | str | os.PathLike[str] | Sequence[str] | None = None,
     timeout: float = 1_800.0,
+    progress: bool = False,
 ) -> City:
     """Build one City directly from GTFS and OSM, then open it."""
 
@@ -1149,7 +1150,7 @@ def build(
         f"--output={output_path}",
         *(["--replace"] if replace else []),
     ]
-    run_json(runtime_info, arguments, timeout=timeout)
+    run_json(runtime_info, arguments, timeout=timeout, progress=progress)
     return open(output_path, runtime=runtime_info)
 
 

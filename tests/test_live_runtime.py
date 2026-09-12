@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -20,11 +22,14 @@ class LiveRuntimeTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.temporary = tempfile.TemporaryDirectory(prefix="vigo-python-integration-")
         inputs = Path(os.environ["VIGO_TEST_INPUTS"])
-        cls.city = vigo.build(
-            Path(cls.temporary.name) / "city",
-            gtfs=inputs / "fixture.zip",
-            osm=inputs / "fixture.osm.pbf",
-        )
+        cls.build_progress = io.StringIO()
+        with contextlib.redirect_stderr(cls.build_progress):
+            cls.city = vigo.build(
+                Path(cls.temporary.name) / "city",
+                gtfs=inputs / "fixture.zip",
+                osm=inputs / "fixture.osm.pbf",
+                progress=True,
+            )
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -60,6 +65,12 @@ class LiveRuntimeTest(unittest.TestCase):
                 for field in ("openMs", "computeMs", "endToEndMs"):
                     self.assertGreaterEqual(route.timing[field], 0)
                 self.assertEqual(route.query["serviceDate"], "2026-07-15")
+
+    def test_build_reports_actual_phases(self) -> None:
+        output = self.build_progress.getvalue()
+        for phase in ("[gtfs]", "[osm]", "Preparing street routing", "Preparing station access", "Saving City", "City built"):
+            self.assertIn(phase, output)
+        self.assertNotIn("100%", output)
 
     def test_waypoints_arrive_by_and_exports(self) -> None:
         route = self.city.route(

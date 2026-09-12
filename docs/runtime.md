@@ -2,6 +2,62 @@
 
 `vigo.open(path)` reads the City manifest, checks its required files, and resolves a runtime. It does not load the complete routing network. The first Query starts its runtime process and opens the required native data.
 
+## From GTFS and OSM to the first answer
+
+Measure `vigo.build()` from just before the call until it returns a City. Use
+local raw files and a new output directory: this includes import, required
+street indexes, transfers, station-access preparation, and publication of the
+saved City. It does not include a Query for a particular service date.
+
+Measure the first `city.route()` separately, and report their combined time
+when answering "how long until a new city can answer?" The first Query can
+prepare its active-service timetable and selected ride geometry.
+
+```python
+from time import perf_counter
+import vigo
+
+runtime = vigo.resolve_runtime()  # Runtime discovery is outside these timers.
+started = perf_counter()
+with vigo.build(
+    "./boston", gtfs="./mbta.zip", osm="./massachusetts.osm.pbf", runtime=runtime
+) as city:
+    built = perf_counter()
+    result = city.route(
+        [-71.062, 42.356], [-71.058, 42.349],
+        depart_at="08:00", service_date="2026-09-04",
+    )
+    answered = perf_counter()
+    print("raw_build_seconds", built - started)
+    print("first_query_seconds", answered - built)
+    print("raw_to_first_answer_seconds", answered - started)
+    print("status", result.status)
+```
+
+Choose a date covered by the feed. These timers exclude downloads, installation,
+runtime discovery, printing, export, and closing the City. Record those costs
+separately when they belong to the intended workflow. The compiler's
+`city.details["timing"]["totalMs"]` ends before final publication and is not the
+complete elapsed time of `vigo.build()`. Its component stages can overlap.
+
+## Build progress
+
+Install `tqdm` or install this checkout with
+`python -m pip install ".[progress]"`, then call:
+
+```python
+with vigo.build("./boston", gtfs="./mbta.zip", osm="./massachusetts.osm.pbf", progress=True) as city:
+    print(city.name)
+```
+
+The optional display uses `tqdm.auto` and shows the latest stage reported by
+Engine and the elapsed Build time. The timer continues during long stages,
+including street-index preparation. It does not invent a percentage or remaining
+time when Engine has not reported a total. Older runtimes can report fewer
+stages. Build errors retain Engine's explanation; timeout or interruption stops
+the build processes and closes the display. Progress defaults to `False` and
+does not add work to Route or Matrix calls.
+
 ## Reopen a built City
 
 Call `vigo.build()` once for the GTFS and OSM inputs, then use `vigo.open()` on
@@ -63,3 +119,9 @@ If importing the package exposes none of the documented functions, inspect `vigo
 Record `vigo.open()` separately from the first Query: most native loading occurs during that Query. `Result.timing` distinguishes runtime opening and computation where available. For Route and Matrix, `endToEndMs` includes Python request preparation and the runtime response, through payload decoding; Result construction and export occur afterwards. Use an outer wall-clock measurement when including those stages.
 
 Compare first-query and repeated-query durations on the same City, service date, query options, and output detail. Native `engineQueryMs` excludes parts of access, geometry, communication, and Python work; it is not full-route throughput. Count ready Results, blocked Results, setup failures, and query exceptions separately.
+
+Keep `require_transit_ride` explicit when comparing older results: the current
+default is `True`, while `False` also allows walk-only answers. Match
+`disable_cache`, date, walking budget, coordinates, and output detail before
+attributing a latency difference to a version change. A sub-millisecond native
+timetable measurement is distinct from a complete Python Route call.

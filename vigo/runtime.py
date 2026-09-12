@@ -148,9 +148,16 @@ def _candidates(
 
 
 def _run(
-    command: Sequence[str], *arguments: str, timeout: float = 30.0
+    command: Sequence[str], *arguments: str, timeout: float = 30.0, progress: bool = False
 ) -> subprocess.CompletedProcess[str]:
     try:
+        if progress:
+            from .progress import run_with_progress
+
+            return run_with_progress(
+                [*command, *arguments], timeout=timeout,
+                environment=_command_environment(command),
+            )
         return subprocess.run(
             [*command, *arguments],
             capture_output=True,
@@ -261,8 +268,9 @@ def run_json(
     arguments: Sequence[str],
     *,
     timeout: float,
+    progress: bool = False,
 ) -> str:
-    completed = _run(runtime.command, *arguments, timeout=timeout)
+    completed = _run(runtime.command, *arguments, timeout=timeout, progress=progress)
     if completed.returncode != 0:
         message = (
             completed.stderr.strip() or completed.stdout.strip() or "unknown error"

@@ -13,6 +13,7 @@ VIGO Python is the Python interface to VIGO. It must preserve the same City, Sce
 ## Checks
 
 ```bash
+python -m pip install -e ".[progress]" pytest ruff mypy
 python -m pytest -q
 python -m ruff check vigo tests
 python -m mypy vigo

@@ -50,6 +50,11 @@ with vigo.build("./boston", gtfs="./mbta.zip", osm="./massachusetts.osm.pbf") as
 
 An existing City is replaced only with `replace=True`.
 
+For live build stages and elapsed time, install `tqdm` and pass `progress=True`
+to `vigo.build()`. The optional dependency is also available with
+`python -m pip install "./vigo-py[progress]"`. See
+[Runtime and loading](docs/runtime.md) for progress and complete Build timing.
+
 ## Documentation
 
 - [Python reference](docs/reference.md): Route, Matrix, Reach, Scenario, Result, and Job.
