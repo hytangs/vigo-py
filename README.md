@@ -1,25 +1,28 @@
 # VIGO Python
 
-Build and query VIGO City models from Python. The package imports as `vigo` and delegates routing to the VIGO runtime.
+Build a transport model once. Query journeys, travel-time matrices, and reachable areas from Python.
 
-VIGO has three components: Engine computes the queries, Studio provides the desktop application, and Python wraps Engine for scripts. 0.3.1 is a stabilization release with API 1.0, City format 1, and Result schema 1 unchanged.
+The package imports as `vigo` and uses the shared [VIGO Engine](https://github.com/hytangs/vigo). Studio provides the desktop interface; Python provides the same City and Query model for scripts and notebooks. Version 0.4.2 adds self-contained headless platform wheels and resident Route, Matrix, and Reach execution. API 1.0, City format 1, and Result schema 1 remain unchanged.
 
 ```text
-City -> Scenario -> Route | Matrix | Reach -> Result
+GTFS + OSM -> City -> Route | Matrix | Reach -> Result
+                       ^
+                 optional Scenario
 ```
 
 ## Install
 
-Use Python 3.10 or newer:
+Use Python 3.10 or newer. For a self-contained install, select the platform wheel built for your OS and CPU:
 
 ```bash
-git clone https://github.com/hytangs/vigo-py.git
-python -m pip install ./vigo-py
+python -m pip install /path/to/vigo-0.4.2-py3-none-PLATFORM.whl
 ```
 
-Install [VIGO Studio or the VIGO command](https://github.com/hytangs/vigo) separately. Set `VIGO_RUNTIME` to select a command, or `VIGO_APP` to select a Studio installation.
+The platform wheel includes Node, the headless Engine bundle, and the Rust routing kernel. No Studio, system Node, runtime download, or runtime configuration is needed. The installation works offline when the wheel is available locally. Select the actual wheel filename in place of `PLATFORM`.
 
-The same wheel works with a matching runtime on macOS Apple Silicon/Intel, Linux ARM64/x64, and Windows x64. For packaged layouts and City reuse, see [Runtime and loading](docs/runtime.md).
+Source installs remain lightweight and require an explicit compatible Engine installation. Maintainers can [build a self-contained wheel](CONTRIBUTING.md#build-a-headless-wheel) from the two public repositories. External runtimes remain available through `runtime=`, `VIGO_RUNTIME`, or `VIGO_APP`.
+
+See [Runtime and loading](docs/runtime.md) for platform requirements, runtime selection, and process reuse.
 
 ## Open and query
 
@@ -35,35 +38,43 @@ with vigo.open("./boston") as city:
         depart_at="08:00",
         service_date="2026-09-04",
     )
-    print(result.status, result.duration_minutes)
+    if result.status == "ready":
+        print(result.duration_minutes)
+    else:
+        print("No journey under these inputs and constraints.")
     result.export("route.json")
 ```
 
-Choose a service date covered by the supplied feed. Keep the City open for repeated queries: transit Route and Matrix reuse resident processes by service date. The context manager releases them when finished.
+Replace the paths, points, and example date with values covered by your data. Transit queries require a vehicle boarding by default; use `mode="walk"` for walking or `require_transit_ride=False` to allow a direct walk alongside transit. Keep the City open for repeated queries; the context manager releases its resident processes when finished.
 
 ## Build a City
 
 ```python
+import vigo
+
 with vigo.build("./boston", gtfs="./mbta.zip", osm="./massachusetts.osm.pbf") as city:
     print(city.name, city.revision_id, city.built_at)
 ```
 
-An existing City is replaced only with `replace=True`.
+Build once, then reopen the complete directory with `vigo.open("./boston")`. Raw GTFS and OSM files are no longer needed for querying. An existing City is replaced only with `replace=True`.
 
 For live build stages and elapsed time, install `tqdm` and pass `progress=True`
-to `vigo.build()`. The optional dependency is also available with
-`python -m pip install "./vigo-py[progress]"`. See
+to `vigo.build()`. See
 [Runtime and loading](docs/runtime.md) for progress and complete Build timing.
 
 ## Documentation
 
-- [Python reference](docs/reference.md): Route, Matrix, Reach, Scenario, Result, and Job.
-- [Runtime and loading](docs/runtime.md): discovery, process reuse, timeouts, and measurement.
-- [Concepts](docs/concepts.md): model, outcomes, and evidence limits.
-- [Contributing](CONTRIBUTING.md): tests and a public synthetic integration fixture.
+| Task | Guide |
+| --- | --- |
+| Choose the right Query | [Documentation](docs/README.md) · [Concepts](docs/concepts.md) |
+| Run a study or automate repeated work | [Workflows](docs/workflows.md) · [Notebooks](notebooks/README.md) |
+| Look up arguments and defaults | [Python reference](docs/reference.md) |
+| Interpret, compare, and export answers | [Results](docs/results.md) |
+| Configure or diagnose execution | [Runtime](docs/runtime.md) · [Troubleshooting](docs/troubleshooting.md) |
+| Develop the wrapper or build wheels | [Contributing](CONTRIBUTING.md) |
 
-A `blocked` Result is a valid computation with no usable journey or surface. Invalid requests and execution failures raise exceptions. VIGO 0.3 is pre-release software; results describe its supplied timetable and street model.
+A `blocked` Result is a valid computation with no usable journey or surface. Matrix outcomes belong to individual rows; a completed Matrix can include blocked pairs. Invalid requests and execution failures raise exceptions. VIGO 0.4 is pre-release software; results describe the supplied timetable and street model.
 
-Planned-service Scenarios support Reach; supplied traffic supports Drive Route/Matrix. Live transit is limited to Studio Route and is unavailable through this Python API. Read the engine's [routing limits](https://github.com/hytangs/vigo/blob/main/docs/known-routing-limitations.md), particularly station access, unsupported GTFS semantics, and street coverage.
+Planned-service Scenarios support Reach; supplied traffic supports Drive Route/Matrix. Live transit is unavailable through this Python API. Read the engine's [routing limits](https://github.com/hytangs/vigo/blob/main/docs/reference/known-routing-limitations.md), particularly station access, unsupported GTFS semantics, and street coverage.
 
 Licensed under the [Apache License 2.0](LICENSE).

@@ -727,10 +727,11 @@ class City:
         if live:
             return Support(False, "live_transit_python", ("studio",))
         if traffic:
-            if isinstance(query, Route) and query.mode == "drive":
-                return Support(True)
-            if isinstance(query, Matrix) and query.mode == "drive":
-                return Support(True)
+            if isinstance(query, (Route, Matrix)) and query.mode == "drive":
+                kind = "route" if isinstance(query, Route) else "matrix"
+                if self._query_capability(kind).get("suppliedTraffic"):
+                    return Support(True)
+                return Support(False, "runtime_supplied_traffic", ("runtime with supplied traffic support",))
             return Support(False, "traffic_context", ("drive_route", "drive_matrix"))
         return Support(True)
 
@@ -834,12 +835,15 @@ class City:
             **({"maxTransfers": query.max_transfers} if query.max_transfers is not None else {}),
             "departureWindowMinutes": query.departure_window_minutes,
             **(
-                {"traffic": _thaw(scenario.traffic)}
-                if scenario and scenario.traffic
+                {"traffic": _thaw(scenario.traffic), "routingDataMode": "realtime"}
+                if scenario and scenario.traffic is not None
                 else {}
             ),
         }
-        if query.mode == "transit" and scenario is None and not query.waypoints:
+        if self._query_capability("route").get("resident"):
+            with self._stream(service_date) as stream:
+                payload = stream.route({"kind": "route", **request})
+        elif query.mode == "transit" and scenario is None and not query.waypoints:
             with self._stream(service_date) as stream:
                 response = stream.route(request)
             timing = response.get("timing", {})
@@ -920,8 +924,8 @@ class City:
                 else {}
             ),
             **(
-                {"traffic": _thaw(scenario.traffic)}
-                if scenario and scenario.traffic
+                {"traffic": _thaw(scenario.traffic), "routingDataMode": "realtime"}
+                if scenario and scenario.traffic is not None
                 else {}
             ),
         }
@@ -938,8 +942,11 @@ class City:
         )
 
     def _reach(self, query: Reach, scenario: Scenario | None) -> Result:
+        started = time.perf_counter()
         clock, service_date = _clock(query.depart_at, query.service_date)
         request = {
+            "time": clock,
+            "maxWalkKm": query.max_walk_km,
             "origin": _point_payload(query.origin),
             "cutoffsMinutes": list(query.cutoffs_minutes),
             "extentRadiusKm": query.extent_radius_km,
@@ -958,21 +965,28 @@ class City:
                 else {}
             ),
         }
-        payload = _json_command(
-            self.runtime,
-            self.path,
-            "reach",
-            request,
-            [
-                f"--time={clock}",
-                f"--service-date={service_date}",
-                f"--max-walk={query.max_walk_km:g}",
-                f"--walk-speed={query.walk_speed_kph:g}",
-                f"--extent-radius={query.extent_radius_km:g}",
-                f"--raster-size={query.raster_size}",
-                f"--cutoffs={','.join(f'{value:g}' for value in query.cutoffs_minutes)}",
-            ],
-            self.timeout,
+        if self._query_capability("reach").get("resident"):
+            with self._stream(service_date) as stream:
+                payload = stream.route({"kind": "reach", **request})
+        else:
+            payload = _json_command(
+                self.runtime,
+                self.path,
+                "reach",
+                request,
+                [
+                    f"--time={clock}",
+                    f"--service-date={service_date}",
+                    f"--max-walk={query.max_walk_km:g}",
+                    f"--walk-speed={query.walk_speed_kph:g}",
+                    f"--extent-radius={query.extent_radius_km:g}",
+                    f"--raster-size={query.raster_size}",
+                    f"--cutoffs={','.join(f'{value:g}' for value in query.cutoffs_minutes)}",
+                ],
+                self.timeout,
+            )
+        payload.setdefault("timing", {})["endToEndMs"] = round(
+            (time.perf_counter() - started) * 1000, 3
         )
         return Result(
             "reach",

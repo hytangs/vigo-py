@@ -1,10 +1,12 @@
 # Python reference
 
-Install the package and runtime using the [README](../README.md). The examples below use a City built from the corresponding GTFS and OSM sources.
+Install the package and runtime using the [README](../README.md). Examples use a complete City; substitute its exact stop IDs, coordinates, and covered service dates. For complete scripts, use [Workflows](workflows.md).
+
+[Open](#open-a-city) · [Build](#build-a-city) · [Points and time](#points-and-time) · [Route](#route) · [Matrix](#matrix) · [Reach](#reach) · [Scenario](#scenario) · [Result](#result) · [Job](#job) · [Errors](#errors)
 
 ## Open a City
 
-A City is one complete directory built from GTFS and OSM. It moves as one unit.
+A City is one complete directory built from GTFS and OSM. It moves as one unit. `vigo.open(city, *, runtime=None, timeout=120.0)` returns a `City`; paths may be strings or path-like objects. `timeout` controls Query execution in seconds, not total context-manager lifetime.
 
 ```python
 import vigo
@@ -29,18 +31,21 @@ print(result.status, result.duration_minutes)
 Coordinates always use `[longitude, latitude]`:
 
 ```python
-result = city.route(
-    [-71.062, 42.356],
-    [-71.058, 42.349],
-    mode="walk",
-    depart_at="08:00",
-    service_date="2026-09-04",
-)
+with vigo.open("./boston") as city:
+    result = city.route(
+        [-71.062, 42.356],
+        [-71.058, 42.349],
+        mode="walk",
+        depart_at="08:00",
+        service_date="2026-09-04",
+    )
 ```
+
+`city.path`, `name`, `revision_id`, `built_at`, and `sources` identify the opened model. `details` returns its manifest; `capabilities` returns the selected runtime's advertised capabilities. `city.runtime` is the resolved `RuntimeInfo`. `close()` releases resident processes; already returned Results remain usable.
 
 ## Build a City
 
-`vigo.build()` writes one complete City directly to the requested location.
+`vigo.build(output, *, gtfs, osm, private_access="public", replace=False, runtime=None, timeout=1800.0, progress=False)` writes one complete City and returns it opened for queries. `gtfs` accepts one ZIP path or a sequence of paths; `osm` accepts one OSM PBF path.
 
 ```python
 with vigo.build(
@@ -64,6 +69,24 @@ the public middle of a journey and transit transfers cannot use private shortcut
 It assumes endpoint authorization and does not infer ownership or gate hours.
 An older runtime that lacks this feature is rejected before Build.
 
+`timeout` here bounds the build command. The returned City uses the default 120-second Query timeout; reopen it with `vigo.open(..., timeout=...)` when longer Query limits are needed. Runtime discovery and capability checks have their own limits. See [Runtime and loading](runtime.md).
+
+## Points and time
+
+| Input | Example | Meaning |
+| --- | --- | --- |
+| Stop ID | `"A"` or `{"stopId": "A"}` | Exact ID in this City; no name lookup or geocoding |
+| Coordinate pair | `[-71.062, 42.356]` | Longitude, then latitude |
+| Coordinate mapping | `{"coordinate": [-71.062, 42.356]}` | Explicit point object |
+| Matrix point set | `{"home": [-71.062, 42.356]}` | Caller ID mapped to a point |
+| Matrix point sequence | `["A", "B"]` | Auto-generated IDs such as `origin_1` and `origin_2` |
+
+A numeric pair is one coordinate point, not two Matrix endpoints. A mapping with a point key such as `stopId` or `coordinate` is one point, not an ID-to-point set. Use descriptive, unique caller IDs for Matrix sets. The complete [Engine point contract](https://github.com/hytangs/vigo/blob/main/docs/reference/routing.md) describes stop access semantics.
+
+Time arguments accept `HH:MM`, `datetime.time`, or `datetime.datetime`. A datetime supplies its date unless an explicit `service_date` overrides it. Datetime timezone information is not converted; seconds are omitted. Pass a clock already expressed in the feed's local service time.
+
+String clocks support service-day hours through `29:59`. For example, `depart_at="25:15", service_date="2026-09-04"` means 01:15 on the following civil day within the September 4 service day. Changing the date to September 5 changes which service calendar is selected. `service_date` accepts an ISO date string or `datetime.date` and remains required for all modes unless supplied by a datetime.
+
 ## Route
 
 Transit Route and Matrix require a vehicle boarding by default. Use `mode="walk"` for a walking journey, or `require_transit_ride=False` to compare transit with walking. `horizon_minutes` sets the transit search horizon (1–2880 minutes; default 480).
@@ -85,7 +108,7 @@ Route includes point-to-point, depart-at, arrive-by, departure-window, walking, 
 | `horizon_minutes` | `480` | Timetable search horizon, 1–2880 minutes |
 | `disable_cache` | `False` | Disable transit street-access and walking-path caches |
 
-Choose departure or arrival time, never both. Datetime values supply their date and clock; the wrapper does not convert them between timezones.
+Choose departure or arrival time, never both. A nonzero departure window applies to depart-at only.
 
 ```python
 route = city.route(
@@ -103,7 +126,7 @@ requests = [
 results = city.run(requests)
 ```
 
-`City.run(query)` and `Scenario.run(query)` are the execution primitives. `city.route(...)`, `city.matrix(...)`, and `city.reach(...)` are convenience constructors with exactly the same behavior.
+`City.run(query)` and `Scenario.run(query)` are the execution primitives. `city.route(...)`, `city.matrix(...)`, and `city.reach(...)` are convenience constructors with exactly the same behavior. A sequence executes in input order and returns a list; it stops at the first exception. Use an explicit [batch loop](workflows.md#retain-every-batch-outcome) to retain failures individually.
 
 Depart-at minimizes arrival time, then boardings, then walking. Arrive-by maximizes departure time; among journeys leaving at that boundary and arriving by the deadline, it minimizes boardings, then walking, then actual arrival.
 
@@ -114,7 +137,7 @@ Depart-at minimizes arrival time, then boardings, then walking. Arrive-by maximi
 waypoints is currently unsupported. The runtime must advertise transfer-cap
 support; Python rejects this option on older runtimes instead of ignoring it.
 
-Repeated transit Route calls reuse an open process for the selected service date. Each open City keeps a bounded pool of one to four processes, according to available CPU and memory. Switching dates reclaims the least recently used idle process; active queries finish before their process is closed. Route answers themselves are recomputed.
+With the bundled engine, Route, Matrix, and Reach reuse resident processes by service date. Route answers themselves are recomputed. See [process lifetime](runtime.md#keep-a-city-open) for older-runtime fallback and concurrency behavior.
 
 For transit Route and Matrix measurements, `disable_cache=True` disables
 street-access frontier and reconstructed walking-path caches. It keeps the
@@ -138,10 +161,12 @@ matrix = city.matrix(
 )
 
 for row in matrix.rows:
-    print(row["originId"], row["destinationId"], row["durationMinutes"])
+    print(row["originId"], row["destinationId"], row["status"], row["durationMinutes"])
 ```
 
 Use `mode="walk"` or `mode="drive"` for street matrices.
+
+The Matrix Result is `ready` when the computation completes; some or all of its rows may still be blocked. Count row outcomes before aggregating durations. See [Matrix results](results.md#matrix).
 
 `origins` and `destinations` accept a point, a mapping of caller IDs to points, or a sequence of points. Matrix shares Route's mode, date, time constraint, walking budget, objective, transfer cap, transit requirement, horizon, and cache control. It defaults to an `08:00` departure when neither time constraint is supplied. Matrix has no waypoints or departure window.
 
@@ -203,50 +228,35 @@ reach.export("reach.geojson")
 
 Use the word Accessibility only when a separate analysis combines travel impedance with opportunities.
 
+`extent_radius_km` bounds the computed area, not just the display. `raster_size` changes the grid resolution. Keep both fixed, together with the origin and other assumptions, when comparing a baseline and a Scenario.
+
 ## Scenario
 
-A Scenario is an immutable set of changes tied to one City revision. Query walking limits remain Query parameters; they are not Scenario changes.
+`city.scenario(name, *, services=(), without_routes=(), live=None, traffic=None, expires_at=None)` returns an immutable Scenario tied to that City revision. It exposes the same `run`, `route`, `matrix`, `reach`, `supports`, and `submit` methods. Query options such as walking limits remain Query parameters.
 
-```python
-service_changes = [{
-    "operation": "add",
-    "name": "Crosstown",
-    "stops": [
-        {"label": "West", "coordinate": [-71.08, 42.35]},
-        {"label": "East", "coordinate": [-71.04, 42.36]},
-    ],
-    "headwayMinutes": 10,
-}]
+| Scenario state | Supported Python Queries |
+| --- | --- |
+| No changes | The City's supported Queries |
+| `services` and/or `without_routes` | Scheduled Reach |
+| `traffic` | Drive Route and Matrix, with advertised supplied-traffic capability |
+| `live` | Unavailable through Python |
+| Combined planned, live, or traffic states | Unsupported |
 
-proposal = city.scenario(
-    "Ten-minute service",
-    services=service_changes,
-)
+`services` accepts mappings following the Engine's [service change contract](https://github.com/hytangs/vigo/blob/main/docs/reference/scenarios.md). `without_routes` accepts exact route IDs. `traffic` is a supplied snapshot; constructing a Scenario does not fetch observations or establish their validity. The runtime validates the snapshot when executing a supported query. Python sends traffic in explicit realtime mode for Drive Route and Matrix; scheduled transit remains separate.
 
-origin = [-71.062, 42.356]
-before = city.reach(
-    origin,
-    depart_at="08:00",
-    service_date="2026-09-04",
-)
-after = proposal.reach(
-    origin,
-    depart_at="08:00",
-    service_date="2026-09-04",
-)
-difference = vigo.compare(before, after)
-```
+Nested Scenario inputs are copied and frozen. `expires_at` is an optional datetime checked before execution; expired Scenarios raise `VigoError`. A Scenario does not alter the City's baseline. Follow the [service proposal workflow](workflows.md#compare-a-service-proposal) for a complete example.
 
 Inspect support before running a context-dependent Query:
 
 ```python
-query = vigo.Reach(origin, service_date="2026-09-04")
-support = proposal.supports(query)
-if not support.supported:
-    print(support.reason, support.available)
+with vigo.open("./boston") as city:
+    proposal = city.scenario("Route removed", without_routes=["route-to-remove"])
+    query = vigo.Reach([-71.062, 42.356], service_date="2026-09-04")
+    support = proposal.supports(query)
+    print(support.supported, support.reason, support.available)
 ```
 
-In VIGO 0.3, planned service changes are available for Reach. Unsupported combinations raise `UnsupportedQuery`; malformed or contradictory Queries raise `InvalidQuery`. Neither becomes a Result.
+`Support` contains `supported`, `reason`, and `available`. The check reports supported combinations and selected option constraints; it does not fully validate endpoints, service coverage, Scenario expiry, or all runtime inputs. A supported Query can still fail during execution or return a blocked Result.
 
 ## Result
 
@@ -262,20 +272,49 @@ result.record
 result.export("result.json")
 ```
 
-Route Results add `duration_minutes` and `legs`. Matrix Results add `rows`. Reach Results add `to_geojson()`.
+Route Results add `duration_minutes` and `legs`. Matrix Results add `rows`. Both Route and Reach support `to_geojson()`. `value` exposes the family-specific answer; `to_dict()` returns the complete Engine payload.
+
+See [Results](results.md) for fields, export formats, row outcomes, and comparison limits. `vigo.compare(before, after)` and `before.compare(after)` return a comparison Result without rerunning the Queries. The caller must align the study inputs; comparison does not validate all Query assumptions.
 
 `Result.status` is only `ready` or `blocked`. A blocked Result is a valid computation with no usable journey or surface. Cancellation and execution failures belong to `Job.status` or exceptions, not Result status.
 
-Long work can run in the background:
+## Job
+
+`city.submit(query)` or `scenario.submit(query)` returns a `Job`. Pass one Query or a sequence; `wait()` returns one Result or a list respectively. Background submission keeps the calling Python thread available; it does not promise parallel queries for the same service date.
+
+Keep the City open until its submitted work finishes:
 
 ```python
-job = city.submit(vigo.Matrix(origins, destinations, depart_at="08:00", service_date="2026-09-04"))
-result = job.wait()
+with vigo.open("./boston") as city:
+    query = vigo.Matrix(
+        {"home": [-71.062, 42.356]}, {"school": [-71.058, 42.349]},
+        depart_at="08:00", service_date="2026-09-04",
+    )
+    job = city.submit(query)
+    result = job.wait()
 ```
 
-`Job.status` is `queued`, `running`, `ready`, `cancelled`, or `error`.
-
+`Job.status` is `queued`, `running`, `ready`, `cancelled`, or `error`. A ready job may contain a blocked Result.
 
 `Job.cancel()` cancels queued work only. A running Query finishes normally.
 `Job.wait(timeout=...)` bounds the wait for the background result; it does not cancel the Query.
 See [Runtime and loading](runtime.md) for process reuse and timing boundaries.
+
+## Errors
+
+| Exception | Meaning |
+| --- | --- |
+| `InvalidQuery` | Python-side query validation failed; also a `ValueError` |
+| `UnsupportedQuery` | A combination or option is unsupported; `.support` contains the reason and alternatives |
+| `VigoTimeoutError` | A runtime operation exceeded its timeout; also a `TimeoutError` |
+| `VigoError` | Base class for VIGO failures, including runtime validation, incomplete Cities, execution failures, and the subclasses above |
+
+Python constructor misuse can also raise ordinary `TypeError` or `ValueError`; export can raise filesystem errors. `Job.wait()` re-raises the background exception. Its own wait timeout raises `TimeoutError` without cancelling the Query. No exception is converted into a blocked Result.
+
+## Runtime information
+
+`vigo.resolve_runtime(runtime=None, *, verify=True)` returns `RuntimeInfo` with `product_version`, `api_version`, `source`, `path`, `command`, and `capabilities`. Use the default verification for Query execution. `verify=False` only resolves a candidate command and returns no verified capabilities; it is not a compatibility check.
+
+A runtime argument can be a `RuntimeInfo`, a path to a supported runtime layout or executable, or a sequence of command arguments. See [Runtime and loading](runtime.md#select-a-runtime) for selection, compatibility, and platform requirements.
+
+[Documentation](README.md) · [Workflows](workflows.md) · [Troubleshooting](troubleshooting.md)

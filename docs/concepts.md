@@ -1,9 +1,11 @@
 # VIGO concepts
 
-VIGO has four first-class concepts and three Queries.
+VIGO has four first-class concepts and three Query families. Build or open a City, optionally apply a Scenario, then retain the Result of a Query.
 
 ```text
-City -> Scenario -> Route | Matrix | Reach -> Result
+City -> Route | Matrix | Reach -> Result
+  ^
+optional Scenario
 ```
 
 ## City
@@ -18,7 +20,7 @@ A named City may be rebuilt over time. Each build is an immutable revision. A Re
 
 A Scenario is an immutable set of changes applied to exactly one City revision.
 
-It may contain:
+The shared VIGO model can describe:
 
 - proposed transit service changes;
 - one live transit state;
@@ -28,9 +30,9 @@ Query choices such as a walking limit, departure time, or time cutoff are not Sc
 
 VIGO checks a selected combination before running it. It never drops an unsupported change and quietly returns the unchanged City.
 
-In 0.3.1, Python supports planned service changes in Reach and supplied traffic in Drive Route/Matrix. Live transit is available only in Studio Route; Python live Scenarios, realtime Matrix, and realtime Reach are unsupported.
+In 0.4.2, Python supports planned service changes in Reach and supplied traffic in Drive Route/Matrix. Python live-transit Scenarios, realtime transit Matrix, and realtime Reach are unsupported. Supplied traffic uses the shared native driving kernel and requires an engine that advertises that capability.
 
-`city.supports(query)` and `scenario.supports(query)` return a `Support` value with a reason and available alternative when the selected context cannot execute a valid Query.
+`city.supports(query)` and `scenario.supports(query)` return a `Support` value with a reason and available alternative when the selected context cannot execute a combination. This is not a complete data-validation pass; execution still checks points, dates, and runtime inputs. See the [Python support table](reference.md#scenario).
 
 ## Query
 
@@ -70,7 +72,9 @@ A Result is the immutable answer to one Query. Every Result exposes:
 
 Compare is an action on two compatible Results. It is not a fourth Query family.
 
-Result status is only `ready` or `blocked`. Invalid inputs raise `InvalidQuery`. Valid combinations that the selected City or Scenario cannot execute raise `UnsupportedQuery`. Runtime failures raise `VigoError`. Background work separately reports `queued`, `running`, `ready`, `cancelled`, or `error` through `Job.status`.
+Result status is only `ready` or `blocked`. A completed Matrix is ready even when individual rows are blocked. Python-side query validation raises `InvalidQuery`; unsupported combinations raise `UnsupportedQuery`; runtime validation and execution failures raise `VigoError`. Background work separately reports `queued`, `running`, `ready`, `cancelled`, or `error` through `Job.status`.
+
+Compare uses retained values and checks family-specific structure; the caller must align dates, points, modes, and other study assumptions. A valid numerical difference does not establish that two Results answer the same question. See [Results](results.md) for comparison and evidence boundaries.
 
 ## Time
 
@@ -82,6 +86,8 @@ VIGO keeps these durations separate:
 - End to end: caller submission through complete Result.
 
 Repeated Route calls may reuse one open process. The answer is still computed for every call.
+
+The wrapper's `timing["endToEndMs"]` ends before Result construction and export. Use an outer timer for the complete Python operation; see [runtime measurement](runtime.md#measure-the-complete-operation).
 
 ## Python
 
@@ -103,3 +109,5 @@ The VIGO command line uses the same nouns: `vigo build`, `vigo inspect`, `vigo r
 (or use `None`) for no additional cap. It applies to both `depart_at` and
 `arrive_by` and all Matrix shapes. A finite cap with ordered transit
 waypoints is currently unsupported.
+
+[Documentation](README.md) · [Workflows](workflows.md) · [Reference](reference.md)

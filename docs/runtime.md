@@ -2,6 +2,20 @@
 
 `vigo.open(path)` reads the City manifest, checks its required files, and resolves a runtime. It does not load the complete routing network. The first Query starts its runtime process and opens the required native data.
 
+## Installation choices
+
+| Install | Engine requirement | Use it for |
+| --- | --- | --- |
+| Platform wheel with bundled runtime | Included Node, headless bundle, and native kernel | A self-contained Python environment |
+| Source checkout or universal development wheel | Select a compatible external Engine | Wrapper development or an independently managed Engine |
+| Python with a complete Studio installation | Select the app or extracted distribution | Reusing the Engine shipped with Studio |
+
+Python requires version 3.10 or newer. Install a local platform wheel with `python -m pip install /path/to/vigo-0.4.2-py3-none-PLATFORM.whl`, substituting its real filename. The package has no mandatory Python dependencies. `tqdm` is optional for Build progress.
+
+For a source install, run `python -m pip install -e .` from the wrapper checkout, then select a compatible runtime explicitly. An adjacent Engine checkout is not automatically selected. Maintainers can [stage and build a headless platform wheel](../CONTRIBUTING.md#build-a-headless-wheel).
+
+The self-contained wheel still communicates with a Node process. Rust performs routing kernels; JavaScript handles GTFS row loading, orchestration, and itinerary assembly. It is not a direct Python/Rust extension.
+
 ## From GTFS and OSM to the first answer
 
 Measure `vigo.build()` from just before the call until it returns a City. Use
@@ -76,7 +90,7 @@ the raw network data requires a new build.
 
 Reopening still reads files and allocates working memory. Reusing one open City
 also avoids those costs. `Result.timing["openMs"]` measures runtime preparation
-on the first resident query and is zero for later queries in that process.
+the first time each mode is prepared in a resident process, and is zero when that mode is reused.
 
 ## Select a runtime
 
@@ -90,33 +104,55 @@ with vigo.open("./boston", runtime=runtime) as city:
     print(city.sources)
 ```
 
-An explicit `runtime=` argument takes precedence. Otherwise discovery tries `VIGO_RUNTIME`, `VIGO_APP`, a sibling source build, installed `VIGO Studio.app` locations, and `vigo` on `PATH`, in that order. Runtime paths and explicit command sequences are supported. Python requires API 1.x, City format 1, Result schema 1, and the public commands; product patch versions may differ.
+Selection follows this order:
 
-The Python wheel is platform independent; its selected runtime must match the OS and CPU. VIGO 0.3.1 targets macOS Apple Silicon/Intel, Linux ARM64/x64 with glibc, and Windows x64. Set `VIGO_APP` or `runtime=` to a macOS `.app`, an extracted Studio distribution directory, or the packaged executable (`VIGO Studio.exe` on Windows, `VIGO Studio` on Linux). Keep the accompanying `resources` directory in place. The packaged runtime does not require a separately installed Node.js. Windows/Linux installations are selected explicitly unless `vigo` is on `PATH`.
+1. The explicit `runtime=` argument.
+2. `VIGO_RUNTIME`, then `VIGO_APP`.
+3. The bundled headless runtime.
+4. Installed `VIGO Studio.app` locations on macOS.
+5. `vigo` on `PATH`.
 
-Successful capability checks are retained for up to eight runtime identities. Each lookup checks the command files' metadata, so replacing or rebuilding the runtime triggers a new check. Failed checks are not cached. Returned capability dictionaries are independent copies. Pass a previously resolved `RuntimeInfo` to reuse that selection explicitly.
+An invalid explicit setting fails rather than selecting another engine. Once a complete bundled layout is selected, a failed capability check also ends discovery. Sibling source checkouts are not discovered implicitly. Python requires API 1.x, City format 1, Result schema 1, and the public commands; product versions may differ.
 
-Matrix requires advertised resident execution. Transfer caps, arrive-by Matrix, journey output, and transit cache controls also require their advertised capabilities. Unsupported combinations raise `UnsupportedQuery`; Python does not silently ignore these options or fall back to the retired one-shot Matrix path.
+Use a path for a complete runtime directory or executable. Use an argument sequence for a custom command; a shell command string is not split into executable and arguments:
+
+```python
+runtime = vigo.resolve_runtime("./headless")
+with vigo.open("./boston", runtime=runtime) as city:
+    print(city.runtime.source, city.runtime.product_version)
+```
+
+Selecting a source `vigo.mjs` file uses system Node. Build its compatible native kernel and CLI together; the [maintainer build steps](../CONTRIBUTING.md#build-a-headless-wheel) show the required Engine commands.
+
+Platform wheels include a private Node 24.18.0 executable, `vigo.mjs`, the native kernel, license notices, and a checksum manifest. Supported build targets are macOS 14+ ARM64/x64, Linux ARM64/x64 with glibc 2.39+ (Ubuntu 24.04 builders), and Windows x64. A wheel must match the target OS and CPU. Source installs and universal development wheels need an external runtime. No import-time or query-time downloads occur.
+
+A headless runtime directory can also be passed to `runtime=`. Keep its files together. For Studio compatibility, use a complete macOS `.app`, extracted Studio distribution, or packaged executable with its `resources` directory. Bundled/headless child processes inherit only OS paths and locale settings; provider secrets, Node injection options, and foreign kernel overrides are excluded. Explicit external commands retain the caller's environment.
+
+Successful capability checks are retained for up to eight runtime identities. Each lookup checks the command files' and explicitly selected native kernel's metadata, so replacing or rebuilding the runtime triggers a new check. Failed checks are not cached. Returned capability dictionaries are independent copies. Pass a previously resolved `RuntimeInfo` to reuse that selection explicitly.
+
+Matrix requires advertised resident execution. Supplied traffic for Drive Route/Matrix requires the corresponding advertised capability; traffic is sent in explicit realtime mode. Transfer caps, arrive-by Matrix, journey output, and transit cache controls also require their advertised capabilities. Unsupported combinations raise `UnsupportedQuery`; Python does not silently ignore these options or fall back to the retired one-shot Matrix path.
 
 ## Keep a City open
 
-Transit Route without waypoints or a Scenario, and all supported Matrix queries, share resident processes by service date. A City keeps one to four processes according to CPU and physical memory. Changing dates reclaims the least recently used idle process. Active queries finish before eviction or `City.close()` releases their process.
+With the bundled engine, all Route modes (including waypoints and supplied traffic), Matrix, and Reach share resident processes by service date. A City keeps one to four processes according to CPU and physical memory. Changing dates reclaims the least recently used idle process. Active queries finish before eviction or `City.close()` releases their process.
 
-Walking, driving, waypoint and Scenario Route calls, and Reach calls use separate command invocations. These currently reopen their required data on each call. Opening several City objects does not share their routing processes.
+Older external engines without the new resident capabilities retain one-shot invocation for Walk, Drive, waypoint/Scenario Route, and Reach. Simple transit Route and Matrix retain their existing resident protocol. Opening several City objects does not share their routing processes.
 
 For repeated work, reuse one City in a context manager. Route answers are recomputed for every call. `disable_cache=True` on transit Route or Matrix disables street-access and reconstructed walking-path caches while leaving the prepared network resident.
+
+Requests for the same service date share and serialize access to its process. Different dates can use separate processes within the pool limit. `submit()` moves work to a background thread; it does not create an independent process per request. Await submitted jobs before leaving the City's context.
 
 ## Timeouts and failures
 
 `vigo.open(..., timeout=120)` sets the Query timeout in seconds. Waiting for an available resident process and waiting for its response each use that limit. A timed-out resident process is stopped; a later Query can start a fresh one. `City.close()` waits for active resident queries before closing their processes.
 
-`vigo.build(..., timeout=1800)` bounds the build command. Runtime discovery uses a separate 30-second capability-check timeout per candidate. Invalid or unavailable runtimes raise `VigoError`; Query timeouts raise `VigoTimeoutError`.
+`vigo.build(..., timeout=1800)` bounds the build command. The City it returns has the default 120-second Query timeout; reopen with a different timeout if needed. Runtime discovery uses a separate 30-second capability-check timeout per candidate. Invalid or unavailable runtimes raise `VigoError`; Query timeouts raise `VigoTimeoutError`. These are per-operation limits, not a single end-to-end deadline.
 
 If importing the package exposes none of the documented functions, inspect `vigo.__file__` and the active interpreter. A local directory named `vigo` can shadow the installed package. Install into the intended interpreter and restart the Python session after correcting its import path.
 
 ## Measure the complete operation
 
-Record `vigo.open()` separately from the first Query: most native loading occurs during that Query. `Result.timing` distinguishes runtime opening and computation where available. For Route and Matrix, `endToEndMs` includes Python request preparation and the runtime response, through payload decoding; Result construction and export occur afterwards. Use an outer wall-clock measurement when including those stages.
+Record `vigo.open()` separately from the first Query: most native loading occurs during that Query. `Result.timing` distinguishes runtime opening and computation where available. For Route, Matrix, and Reach, `endToEndMs` includes Python request preparation and the runtime response, through payload decoding; Result construction and export occur afterwards. Use an outer wall-clock measurement when including those stages.
 
 Compare first-query and repeated-query durations on the same City, service date, query options, and output detail. Native `engineQueryMs` excludes parts of access, geometry, communication, and Python work; it is not full-route throughput. Count ready Results, blocked Results, setup failures, and query exceptions separately.
 
@@ -125,3 +161,5 @@ default is `True`, while `False` also allows walk-only answers. Match
 `disable_cache`, date, walking budget, coordinates, and output detail before
 attributing a latency difference to a version change. A sub-millisecond native
 timetable measurement is distinct from a complete Python Route call.
+
+[Documentation](README.md) · [Troubleshooting](troubleshooting.md) · [Results](results.md)

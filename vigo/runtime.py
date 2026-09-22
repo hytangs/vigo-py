@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Iterator, Mapping, Sequence
@@ -11,10 +12,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
-VERSION = "0.3.1"
+VERSION = "0.4.2"
 API_VERSION = "1.0"
 CITY_FORMAT_VERSION = 1
 RESULT_SCHEMA_VERSION = 1
+_BUNDLED_RUNTIME = Path(__file__).resolve().parent / "_runtime"
 PUBLIC_COMMANDS = (
     "build",
     "capabilities",
@@ -74,6 +76,22 @@ def _app_resources(executable: Path) -> Path:
 def _command_environment(command: Sequence[str]) -> dict[str, str]:
     environment = os.environ.copy()
     executable = Path(command[0])
+    # A colocated headless payload is a closed runtime. Host injection/provider
+    # settings must not substitute a different Node module or native kernel.
+    if len(command) == 2 and executable.name in {"node", "node.exe"}:
+        program = Path(command[1])
+        kernel = program.parent / "vigo-routing-kernel.node"
+        if program.name == "vigo.mjs" and executable.parent == program.parent and kernel.is_file():
+            environment = {
+                key: value for key, value in environment.items()
+                if re.fullmatch(
+                    r"PATH|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|APPDATA|LOCALAPPDATA|"
+                    r"SystemRoot|WINDIR|TEMP|TMP|TMPDIR|XDG_CONFIG_HOME|XDG_CACHE_HOME|"
+                    r"XDG_DATA_HOME|LANG|LANGUAGE|LC_[A-Z_]+|TZ", key, re.IGNORECASE
+                )
+            }
+            environment["VIGO_NATIVE_ROUTING_KERNEL"] = str(kernel)
+            return environment
     app_command = _app_command(executable)
     if app_command and tuple(command[:2]) == app_command:
         environment["ELECTRON_RUN_AS_NODE"] = "1"
@@ -91,6 +109,10 @@ def _path_command(value: str | os.PathLike[str]) -> tuple[str, ...] | None:
     if packaged := _app_command(path):
         return packaged
     if path.is_dir():
+        executable = path / ("node.exe" if os.name == "nt" else "node")
+        program = path / "vigo.mjs"
+        if all(file.is_file() for file in (executable, program, path / "vigo-routing-kernel.node")):
+            return (str(executable.resolve()), str(program.resolve()))
         return None
     if path.is_file():
         if path.name in {"VIGO Studio", "VIGO Studio.exe"}:
@@ -122,17 +144,19 @@ def _candidates(
         configured_command = _path_command(configured)
         if configured_command:
             yield "environment", configured_command
+        return
 
     configured_app = os.environ.get("VIGO_APP")
     if configured_app:
         configured_command = _app_command(Path(configured_app))
         if configured_command:
             yield "studio", configured_command
+        return
 
-    sibling = Path(__file__).resolve().parents[2] / "vigo" / "public" / "vigo.mjs"
-    node = shutil.which("node")
-    if sibling.is_file() and node:
-        yield "checkout", (node, str(sibling))
+    bundled = _path_command(_BUNDLED_RUNTIME)
+    if bundled:
+        yield "bundled", bundled
+        return
 
     for app in (
         Path("/Applications/VIGO Studio.app"),
@@ -183,7 +207,9 @@ def _compatible_api(value: object) -> bool:
 def _command_identity(command: tuple[str, ...]) -> tuple[tuple[object, ...], ...]:
     identities = []
     executable = shutil.which(command[0]) or command[0]
-    for part in (executable, *command[1:]):
+    environment = _command_environment(command)
+    kernel = environment.get("VIGO_NATIVE_ROUTING_KERNEL")
+    for part in (executable, *command[1:], *((kernel,) if kernel else ())):
         path = Path(part)
         try:
             stat = path.stat()
@@ -259,7 +285,7 @@ def resolve_runtime(
     detail = f" Checked: {', '.join(failures)}." if failures else ""
     raise VigoError(
         f"No VIGO runtime compatible with API {API_VERSION} is available. "
-        "Install VIGO Studio or set VIGO_RUNTIME." + detail
+        "Install a VIGO platform wheel or set VIGO_RUNTIME to a compatible headless runtime." + detail
     )
 
 

@@ -204,6 +204,38 @@ class VigoPythonTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_configured_runtime_fails_closed(self) -> None:
+        with patch.dict("os.environ", {"VIGO_RUNTIME": str(self.root / "missing")}), self.assertRaises(vigo.VigoError):
+            vigo.resolve_runtime()
+
+    def test_bundled_runtime_is_relocatable_and_environment_isolated(self) -> None:
+        from vigo.runtime import _command_environment
+        bundle = self.root.resolve() / "headless"
+        bundle.mkdir()
+        import os
+        executable = bundle / ("node.exe" if os.name == "nt" else "node")
+        program, kernel = bundle / "vigo.mjs", bundle / "vigo-routing-kernel.node"
+        for file in (executable, program, kernel):
+            file.touch()
+        with patch.dict("os.environ", {"NODE_OPTIONS": "--bad-option", "VIGO_NATIVE_ROUTING_KERNEL": "wrong",
+                                      "PROVIDER_SECRET": "private", "PATH": "", "HOME": str(self.root)}, clear=True), \
+             patch("vigo.runtime._BUNDLED_RUNTIME", bundle):
+            runtime = vigo.resolve_runtime(verify=False)
+            self.assertEqual(runtime.source, "bundled")
+            self.assertEqual(runtime.command, (str(executable), str(program)))
+            environment = _command_environment(runtime.command)
+            self.assertNotIn("NODE_OPTIONS", environment)
+            self.assertNotIn("PROVIDER_SECRET", environment)
+            self.assertEqual(environment["VIGO_NATIVE_ROUTING_KERNEL"], str(kernel))
+            self.assertEqual(environment["HOME"], str(self.root))
+
+    def test_traffic_requires_an_advertised_runtime_capability(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city:
+            scenario = city.scenario("traffic", traffic={"observations": []})
+            for query in (vigo.Route("A", "B", mode="drive"), vigo.Matrix({"a": "A"}, {"b": "B"}, mode="drive")):
+                with self.assertRaises(vigo.UnsupportedQuery):
+                    scenario.run(query)
+
     def test_runtime_output_is_utf8(self) -> None:
         from vigo.runtime import _run
 

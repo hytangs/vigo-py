@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import io
 import json
 import os
@@ -65,6 +66,60 @@ class LiveRuntimeTest(unittest.TestCase):
                 for field in ("openMs", "computeMs", "endToEndMs"):
                     self.assertGreaterEqual(route.timing[field], 0)
                 self.assertEqual(route.query["serviceDate"], "2026-07-15")
+
+    def test_resident_queries_match_one_shot_and_reuse_process(self) -> None:
+        from vigo.model import _json_command
+        options = {"depart_at": "07:55", "service_date": "2026-07-15", "max_walk_km": 0.2}
+        stream = None
+        for mode, waypoints in (("transit", []), ("walk", []), ("drive", []), ("walk", ["X"])):
+            with self.subTest(mode=mode, waypoints=waypoints):
+                resident = self.city.route("A", "B", mode=mode, waypoints=waypoints, **options)
+                current = self.city._streams["2026-07-15"]
+                if stream is not None:
+                    self.assertIs(current, stream)
+                stream = current
+                one_shot = _json_command(self.city.runtime, self.city.path, "route", {
+                    "origin": "A", "destination": "B", "mode": mode, "waypoints": waypoints,
+                    "requireTransitRide": True,
+                }, ["--service-date=2026-07-15", "--time=07:55", "--max-walk=0.2"], 30)
+                self.assertEqual(resident.status, one_shot["status"])
+                for field in ("durationMinutes", "departMinutes", "arriveMinutes"):
+                    self.assertEqual(resident.value[field], one_shot["result"][field])
+                repeated = self.city.route("A", "B", mode=mode, waypoints=waypoints, **options)
+                self.assertEqual(repeated.timing["openMs"], 0)
+        resident = self.city.reach("A", raster_size=48, extent_radius_km=2, **options)
+        one_shot = _json_command(self.city.runtime, self.city.path, "reach", {
+            "origin": "A", "rasterSize": 48, "extentRadiusKm": 2,
+        }, ["--service-date=2026-07-15", "--time=07:55", "--max-walk=0.2"], 30)
+        for field in ("values", "width", "height", "bounds", "schemaVersion"):
+            self.assertEqual(resident.value[field], one_shot["surface"][field])
+        self.assertEqual(resident.to_geojson(), one_shot["contours"])
+        self.assertIs(self.city._streams["2026-07-15"], stream)
+        self.assertEqual(resident.timing["openMs"], 0)
+
+    def test_traffic_changes_drive_route_and_matrix_without_leaking(self) -> None:
+        options = {"mode": "drive", "service_date": "2026-07-15", "depart_at": "07:55"}
+        baseline = self.city.route("A", "B", **options)
+        traffic = self.city.scenario("delay", traffic={
+            "source": "public-fixture", "observedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "ttlSeconds": 300, "observations": [{
+                "fromCoordinate": [-77.05, 38.9], "toCoordinate": [-77.04, 38.905], "delayFactor": 10,
+            }],
+        })
+        delayed = traffic.route("A", "B", **options)
+        matrix = traffic.matrix({"a": "A"}, {"b": "B"}, **options)
+        self.assertGreater(delayed.duration_minutes, baseline.duration_minutes)
+        self.assertAlmostEqual(delayed.duration_minutes, matrix.rows[0]["durationMinutes"], delta=0.001)
+        self.assertEqual(matrix.query["routingDataMode"], "realtime")
+        self.assertEqual(self.city.route("A", "B", **options).duration_minutes, baseline.duration_minutes)
+        for snapshot in ({}, {"observations": []}):
+            invalid = self.city.scenario("invalid", traffic=snapshot)
+            with self.assertRaises(vigo.VigoError):
+                invalid.matrix({"a": "A"}, {"b": "B"}, **options)
+            with self.assertRaises(vigo.VigoError):
+                invalid.route("A", "B", **options)
+        # A rejected request does not poison the resident process.
+        self.assertEqual(self.city.route("A", "B", **options).duration_minutes, baseline.duration_minutes)
 
     def test_build_reports_actual_phases(self) -> None:
         output = self.build_progress.getvalue()
