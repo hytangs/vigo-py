@@ -65,7 +65,11 @@ VIGO_BUNDLE_RUNTIME=build/headless python -m pip wheel --no-deps --wheel-dir dis
 python scripts/check-wheel.py dist --require-bundled
 ```
 
-On PowerShell, set `$env:VIGO_BUNDLE_RUNTIME = "build/headless"` before the wheel command. Staging downloads only a checksum-pinned official Node archive; it copies the built CLI/native kernel and their license notices. It refuses to overwrite an existing staging directory. Use a new `--output` after an engine rebuild, and select that directory in `VIGO_BUNDLE_RUNTIME`. The build verifies every staged payload hash and rejects extra files. No build or download occurs during package import or query execution.
+On PowerShell, set `$env:VIGO_BUNDLE_RUNTIME = "build/headless"` before the wheel command. Staging downloads only a checksum-pinned official Node archive; it copies the built CLI/native kernel and their license notices.
+
+Rust notices come from the locked dependency graph filtered to the packaged target, using the sources fetched by the native build. Staging remains offline for Cargo and does not require crates for unrelated platforms. The runtime manifest records the Rust target alongside the wheel platform.
+
+Staging refuses to overwrite an existing staging directory. Use a new `--output` after an engine rebuild, and select that directory in `VIGO_BUNDLE_RUNTIME`. The build verifies every staged payload hash and rejects extra files. No build or download occurs during package import or query execution.
 
 Set `VIGO_TEST_INPUTS` to the synthetic fixture directory when checking the wheel to exercise real Build, Route, Matrix, Reach, traffic, and export behavior from an isolated installed package. This check uses the bundled runtime with an empty PATH and intentionally invalid host Node/kernel settings. The optional progress display is tested separately with `tqdm` installed.
 

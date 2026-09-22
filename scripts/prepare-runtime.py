@@ -17,16 +17,36 @@ from pathlib import Path
 NODE_VERSION = "24.18.0"
 # Official nodejs.org/dist/v24.18.0/SHASUMS256.txt. Verify before reading members.
 TARGETS = {
-    ("Darwin", "arm64"): ("darwin-arm64.tar.gz", "macosx_14_0_arm64", "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1"),
-    ("Darwin", "x86_64"): ("darwin-x64.tar.gz", "macosx_14_0_x86_64", "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080"),
-    ("Linux", "aarch64"): ("linux-arm64.tar.gz", "manylinux_2_39_aarch64", "6b4484c2190274175df9aa8f28e2d758a819cb1c1fe6ab481e2f95b463ab8508"),
-    ("Linux", "x86_64"): ("linux-x64.tar.gz", "manylinux_2_39_x86_64", "783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8"),
-    ("Windows", "AMD64"): ("win-x64.zip", "win_amd64", "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821"),
+    ("Darwin", "arm64"): (
+        "darwin-arm64.tar.gz", "macosx_14_0_arm64",
+        "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
+        "aarch64-apple-darwin",
+    ),
+    ("Darwin", "x86_64"): (
+        "darwin-x64.tar.gz", "macosx_14_0_x86_64",
+        "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
+        "x86_64-apple-darwin",
+    ),
+    ("Linux", "aarch64"): (
+        "linux-arm64.tar.gz", "manylinux_2_39_aarch64",
+        "6b4484c2190274175df9aa8f28e2d758a819cb1c1fe6ab481e2f95b463ab8508",
+        "aarch64-unknown-linux-gnu",
+    ),
+    ("Linux", "x86_64"): (
+        "linux-x64.tar.gz", "manylinux_2_39_x86_64",
+        "783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8",
+        "x86_64-unknown-linux-gnu",
+    ),
+    ("Windows", "AMD64"): (
+        "win-x64.zip", "win_amd64",
+        "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821",
+        "x86_64-pc-windows-msvc",
+    ),
 }
 
 
-def third_party_notices(engine: Path) -> str:
-    """Retain licenses for the headless JS dependencies and Rust dependency graph."""
+def third_party_notices(engine: Path, rust_target: str) -> str:
+    """Retain licenses for the headless JS dependencies and the packaged Rust target."""
     sections = []
     seen = set()
 
@@ -54,8 +74,10 @@ def third_party_notices(engine: Path) -> str:
     for name in ("jszip", "papaparse", "pbf"):
         npm(name, engine)
     cargo = shutil.which("cargo") or str(Path.home() / ".cargo/bin" / ("cargo.exe" if platform.system() == "Windows" else "cargo"))
+    # A target build only fetches its own dependencies. Unfiltered metadata also
+    # tries to read crates for other platforms, which breaks fresh offline builds.
     metadata = json.loads(subprocess.check_output(
-        [cargo, "metadata", "--locked", "--offline", "--format-version=1"],
+        [cargo, "metadata", "--locked", "--offline", "--filter-platform", rust_target, "--format-version=1"],
         cwd=engine / "native/vigo-routing-kernel", text=True, timeout=60,
     ))
     for package in metadata["packages"]:
@@ -75,7 +97,7 @@ def main() -> None:
     target = TARGETS.get((platform.system(), platform.machine()))
     if target is None:
         raise SystemExit("No bundled runtime target for this OS/CPU; use an external runtime.")
-    archive_suffix, wheel_platform, digest = target
+    archive_suffix, wheel_platform, digest, rust_target = target
     archive_name = f"node-v{NODE_VERSION}-{archive_suffix}"
     url = f"https://nodejs.org/dist/v{NODE_VERSION}/{archive_name}"
     with urllib.request.urlopen(url, timeout=120) as response:
@@ -112,7 +134,7 @@ def main() -> None:
             ("native/vigo-routing-kernel/vendor/cch/NOTICE", "CCH-NOTICE"),
         ):
             shutil.copyfile(engine / source, staged / name)
-        (staged / "THIRD-PARTY-NOTICES").write_text(third_party_notices(engine), encoding="utf-8")
+        (staged / "THIRD-PARTY-NOTICES").write_text(third_party_notices(engine, rust_target), encoding="utf-8")
         # Execute the relocated payload, not the source checkout or system Node.
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -128,7 +150,7 @@ def main() -> None:
         manifest = {
             "schemaVersion": 1, "productVersion": caps["productVersion"],
             "nodeVersion": NODE_VERSION, "nodeArchiveSha256": digest,
-            "wheelPlatform": wheel_platform,
+            "wheelPlatform": wheel_platform, "rustTarget": rust_target,
             "files": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                       for p in sorted(staged.iterdir()) if p.is_file()},
         }
