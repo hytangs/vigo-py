@@ -73,6 +73,17 @@ def _app_resources(executable: Path) -> Path:
     return executable.parent / "resources"
 
 
+def _closed_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    return {
+        key: value for key, value in environment.items()
+        if re.fullmatch(
+            r"PATH|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|APPDATA|LOCALAPPDATA|"
+            r"SystemRoot|WINDIR|TEMP|TMP|TMPDIR|XDG_CONFIG_HOME|XDG_CACHE_HOME|"
+            r"XDG_DATA_HOME|LANG|LANGUAGE|LC_[A-Z_]+|TZ", key, re.IGNORECASE
+        )
+    }
+
+
 def _command_environment(command: Sequence[str]) -> dict[str, str]:
     environment = os.environ.copy()
     executable = Path(command[0])
@@ -82,18 +93,12 @@ def _command_environment(command: Sequence[str]) -> dict[str, str]:
         program = Path(command[1])
         kernel = program.parent / "vigo-routing-kernel.node"
         if program.name == "vigo.mjs" and executable.parent == program.parent and kernel.is_file():
-            environment = {
-                key: value for key, value in environment.items()
-                if re.fullmatch(
-                    r"PATH|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|APPDATA|LOCALAPPDATA|"
-                    r"SystemRoot|WINDIR|TEMP|TMP|TMPDIR|XDG_CONFIG_HOME|XDG_CACHE_HOME|"
-                    r"XDG_DATA_HOME|LANG|LANGUAGE|LC_[A-Z_]+|TZ", key, re.IGNORECASE
-                )
-            }
+            environment = _closed_environment(environment)
             environment["VIGO_NATIVE_ROUTING_KERNEL"] = str(kernel)
             return environment
     app_command = _app_command(executable)
     if app_command and tuple(command[:2]) == app_command:
+        environment = _closed_environment(environment)
         environment["ELECTRON_RUN_AS_NODE"] = "1"
         environment["VIGO_NATIVE_ROUTING_KERNEL"] = str(
             _app_resources(executable)

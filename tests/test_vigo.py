@@ -236,6 +236,28 @@ class VigoPythonTest(unittest.TestCase):
                 with self.assertRaises(vigo.UnsupportedQuery):
                     scenario.run(query)
 
+    def test_studio_runtime_ignores_host_injection_settings(self) -> None:
+        from vigo.runtime import _command_environment
+        app = self.root.resolve() / "Relocated Studio.app"
+        executable = app / "Contents/MacOS/VIGO Studio"
+        program = app / "Contents/Resources/app/public/vigo.mjs"
+        kernel = app / "Contents/Resources/app/server/vigo-routing-kernel.node"
+        for file in (executable, program, kernel):
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.touch()
+        with patch.dict("os.environ", {
+            "NODE_OPTIONS": "--bad-option", "NODE_PATH": "unrelated-modules",
+            "VIGO_NATIVE_ROUTING_KERNEL": "wrong", "ELECTRON_RUN_AS_NODE": "0",
+            "DYLD_INSERT_LIBRARIES": "unrelated-library", "PROVIDER_SECRET": "private",
+            "PATH": "", "HOME": str(self.root), "LANG": "en_US.UTF-8",
+        }, clear=True):
+            runtime = vigo.resolve_runtime(app, verify=False)
+            self.assertEqual(runtime.command, (str(executable), str(program)))
+            self.assertEqual(_command_environment(runtime.command), {
+                "PATH": "", "HOME": str(self.root), "LANG": "en_US.UTF-8",
+                "ELECTRON_RUN_AS_NODE": "1", "VIGO_NATIVE_ROUTING_KERNEL": str(kernel),
+            })
+
     def test_runtime_output_is_utf8(self) -> None:
         from vigo.runtime import _run
 
