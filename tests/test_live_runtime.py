@@ -213,6 +213,9 @@ class LiveRuntimeTest(unittest.TestCase):
             services=[
                 {
                     "operation": "replace",
+                    # This fixture replaces the whole route with a frequency
+                    # service; preserving source trips requires branch scope.
+                    "scheduleMode": "frequency",
                     "sourceRouteId": "R1",
                     "stops": [
                         {"coordinate": [-77.05, 38.9]},

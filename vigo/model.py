@@ -258,7 +258,12 @@ def _json_command(
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix=f"vigo-{name}-") as temporary:
         request_path = Path(temporary) / "request.json"
-        request_path.write_text(json.dumps(request, allow_nan=False), encoding="utf-8")
+        # Public CLI results are compact. The Python Result API retains its
+        # detailed witness until its own schema migration; request it explicitly.
+        output_request = dict(request)
+        if "trace" in runtime.capabilities.get("output", {}).get("diagnostics", ()):
+            output_request["diagnostics"] = "trace"
+        request_path.write_text(json.dumps(output_request, allow_nan=False), encoding="utf-8")
         output = run_json(
             runtime,
             [name, f"--city={city}", f"--request={request_path}", *arguments],
@@ -270,7 +275,8 @@ def _json_command(
         raise VigoError(f"VIGO {name} returned invalid JSON") from error
     if not isinstance(payload, dict):
         raise VigoError(f"VIGO {name} returned an invalid Result")
-    return payload
+    trace = payload.get("trace")
+    return trace if isinstance(trace, dict) else payload
 
 
 class _RouteStream:

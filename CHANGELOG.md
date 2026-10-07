@@ -4,6 +4,7 @@
 
 - Compare direct walking by default in Route and Matrix; `require_transit_ride=True` retains a boarding requirement.
 - Isolate packaged Studio runtime launches from host Node options, module paths, and library injection settings, as for bundled headless runtimes.
+- Preserve detailed journey results consistently in resident and one-shot calls to engines that use the compact public result format.
 - Add optional `vigo.build(..., progress=True)` stage and elapsed-time display through `tqdm`, including timeout and interruption cleanup.
 - Define raw Build, raw files to first answer, prepared-City reopening, and full Python query timing separately.
 
