@@ -102,7 +102,7 @@ class Route:
     departure_window_minutes: int = 0
     objective: str = "earliest_arrival"
     max_transfers: int | None = None
-    require_transit_ride: bool = True
+    require_transit_ride: bool = False
     horizon_minutes: float = 480
     disable_cache: bool = False
 
@@ -123,7 +123,7 @@ class Matrix:
     max_transfers: int | None = None
     include_journeys: bool = False
     include_geometry: bool = False
-    require_transit_ride: bool = True
+    require_transit_ride: bool = False
     disable_cache: bool = False
 
 

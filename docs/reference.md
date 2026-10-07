@@ -89,7 +89,7 @@ String clocks support service-day hours through `29:59`. For example, `depart_at
 
 ## Route
 
-Transit Route and Matrix require a vehicle boarding by default. Use `mode="walk"` for a walking journey, or `require_transit_ride=False` to compare transit with walking. `horizon_minutes` sets the transit search horizon (1–2880 minutes; default 480).
+Transit Route and Matrix compare a feasible direct walk by default. Use `require_transit_ride=True` to require a vehicle boarding, or `mode="walk"` for a walking journey. `horizon_minutes` sets the transit search horizon (1–2880 minutes; default 480).
 
 Route includes point-to-point, depart-at, arrive-by, departure-window, walking, driving, and batch use.
 
@@ -104,7 +104,7 @@ Route includes point-to-point, depart-at, arrive-by, departure-window, walking, 
 | `departure_window_minutes` | `0` | Depart-at window of plus or minus 0–30 whole minutes |
 | `objective` | `"earliest_arrival"` | The supported objective |
 | `max_transfers` | `None` | Optional cap, 0–31 changes |
-| `require_transit_ride` | `True` | Require at least one vehicle boarding |
+| `require_transit_ride` | `False` | Require at least one vehicle boarding |
 | `horizon_minutes` | `480` | Timetable search horizon, 1–2880 minutes |
 | `disable_cache` | `False` | Disable transit street-access and walking-path caches |
 

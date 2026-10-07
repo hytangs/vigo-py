@@ -28,7 +28,7 @@ with vigo.open("./boston") as city:
     journey.export("outputs/journey.geojson")
 ```
 
-Transit requires at least one boarding by default. Use `mode="walk"` or `mode="drive"` for street routing. With `require_transit_ride=False`, transit can also choose a direct walk within its walking limit. A finite `max_transfers` is currently unsupported with ordered transit waypoints. Changing a constraint changes the question; retain it in the study record.
+Transit compares a feasible direct walk by default. Set `require_transit_ride=True` to require a boarding. Use `mode="walk"` or `mode="drive"` for street routing. A finite `max_transfers` is currently unsupported with ordered transit waypoints. Changing a constraint changes the question; retain it in the study record.
 
 ## Calculate travel times to a common destination
 

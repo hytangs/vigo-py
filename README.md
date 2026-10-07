@@ -45,7 +45,7 @@ with vigo.open("./boston") as city:
     result.export("route.json")
 ```
 
-Replace the paths, points, and example date with values covered by your data. Transit queries require a vehicle boarding by default; use `mode="walk"` for walking or `require_transit_ride=False` to allow a direct walk alongside transit. Keep the City open for repeated queries; the context manager releases its resident processes when finished.
+Replace the paths, points, and example date with values covered by your data. Transit queries compare a feasible direct walk by default. Use `require_transit_ride=True` to require a vehicle boarding, or `mode="walk"` for walking. Keep the City open for repeated queries; the context manager releases its resident processes when finished.
 
 ## Build a City
 

@@ -328,6 +328,17 @@ class VigoPythonTest(unittest.TestCase):
         self.assertIn('Station \u2014 \u5317', route.to_json(indent=None))
         self.assertEqual(json.loads(legacy.to_json(indent=None)), legacy.to_dict())
 
+    def test_direct_walking_is_the_default_across_query_types(self) -> None:
+        self.assertFalse(vigo.Route("A", "B").require_transit_ride)
+        self.assertFalse(vigo.Matrix(["A"], ["B"]).require_transit_ride)
+        with vigo.open(self.city_path, runtime=self.command) as city:
+            for required in (None, True):
+                options = {} if required is None else {"require_transit_ride": required}
+                route = city.route("A", "B", depart_at="08:00", service_date="2026-09-04", **options)
+                matrix = city.matrix(["A"], ["B"], depart_at="08:00", service_date="2026-09-04", **options)
+                self.assertEqual(route.query["requireTransitRide"], required is True)
+                self.assertEqual(matrix.query["requireTransitRide"], required is True)
+
     def test_transit_policy_and_horizon_are_query_parameters(self) -> None:
         with vigo.open(self.city_path, runtime=self.command) as city:
             route = city.route("A", "B", depart_at="08:00", service_date="2026-09-04",

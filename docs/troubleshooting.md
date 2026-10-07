@@ -57,7 +57,7 @@ A blocked journey is a completed model answer. Check, in this order:
 1. The exact service date and feed coverage, including the correct service day for an after-midnight time.
 2. Exact stop IDs or `[longitude, latitude]` coordinate order and City coverage.
 3. Departure versus arrival semantics, horizon, walking budget, and transfer cap.
-4. Whether a vehicle boarding is required. The default is `require_transit_ride=True`.
+4. Whether a vehicle boarding is required. The default is `require_transit_ride=False`; a feasible direct walk can win.
 5. Warnings and the Engine's [routing limits](https://github.com/hytangs/vigo/blob/main/docs/reference/known-routing-limitations.md).
 
 For Matrix, inspect each row even when the Result itself is ready. Do not retry blocked queries as if the runtime crashed. Only relax constraints when that matches the intended question.

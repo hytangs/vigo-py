@@ -80,7 +80,7 @@ class LiveRuntimeTest(unittest.TestCase):
                 stream = current
                 one_shot = _json_command(self.city.runtime, self.city.path, "route", {
                     "origin": "A", "destination": "B", "mode": mode, "waypoints": waypoints,
-                    "requireTransitRide": True,
+                    "requireTransitRide": False,
                 }, ["--service-date=2026-07-15", "--time=07:55", "--max-walk=0.2"], 30)
                 self.assertEqual(resident.status, one_shot["status"])
                 for field in ("durationMinutes", "departMinutes", "arriveMinutes"):

@@ -157,7 +157,7 @@ Record `vigo.open()` separately from the first Query: most native loading occurs
 Compare first-query and repeated-query durations on the same City, service date, query options, and output detail. Native `engineQueryMs` excludes parts of access, geometry, communication, and Python work; it is not full-route throughput. Count ready Results, blocked Results, setup failures, and query exceptions separately.
 
 Keep `require_transit_ride` explicit when comparing older results: the current
-default is `True`, while `False` also allows walk-only answers. Match
+default is `False`, which allows a direct walk to compete with transit. Set `True` to require a boarding. Match
 `disable_cache`, date, walking budget, coordinates, and output detail before
 attributing a latency difference to a version change. A sub-millisecond native
 timetable measurement is distinct from a complete Python Route call.
