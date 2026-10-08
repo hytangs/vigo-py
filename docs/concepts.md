@@ -30,7 +30,7 @@ Query choices such as a walking limit, departure time, or time cutoff are not Sc
 
 VIGO checks a selected combination before running it. It never drops an unsupported change and quietly returns the unchanged City.
 
-In 0.4.2, Python supports planned service changes in Reach and supplied traffic in Drive Route/Matrix. Python live-transit Scenarios, realtime transit Matrix, and realtime Reach are unsupported. Supplied traffic uses the shared native driving kernel and requires an engine that advertises that capability.
+Python supports planned service changes in Reach and supplied traffic in Drive Route/Matrix. Python live-transit Scenarios, realtime transit Matrix, and realtime Reach are unsupported. Supplied traffic uses the shared native driving kernel and requires an engine that advertises that capability.
 
 `city.supports(query)` and `scenario.supports(query)` return a `Support` value with a reason and available alternative when the selected context cannot execute a combination. This is not a complete data-validation pass; execution still checks points, dates, and runtime inputs. See the [Python support table](reference.md#scenario).
 

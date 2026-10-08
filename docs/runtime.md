@@ -10,7 +10,7 @@
 | Source checkout or universal development wheel | Select a compatible external Engine | Wrapper development or an independently managed Engine |
 | Python with a complete Studio installation | Select the app or extracted distribution | Reusing the Engine shipped with Studio |
 
-Python requires version 3.10 or newer. Install a local platform wheel with `python -m pip install /path/to/vigo-0.4.2-py3-none-PLATFORM.whl`, substituting its real filename. The package has no mandatory Python dependencies. `tqdm` is optional for Build progress.
+Python requires version 3.10 or newer. Install a local platform wheel with `python -m pip install /path/to/vigo-0.5.0-py3-none-PLATFORM.whl`, substituting its real filename. The package has no mandatory Python dependencies. `tqdm` is optional for Build progress.
 
 For a source install, run `python -m pip install -e .` from the wrapper checkout, then select a compatible runtime explicitly. An adjacent Engine checkout is not automatically selected. Maintainers can [stage and build a headless platform wheel](../CONTRIBUTING.md#build-a-headless-wheel).
 
@@ -67,8 +67,7 @@ with vigo.build("./boston", gtfs="./mbta.zip", osm="./massachusetts.osm.pbf", pr
 The optional display uses `tqdm.auto` and shows the latest stage reported by
 Engine and the elapsed Build time. The timer continues during long stages,
 including street-index preparation. It does not invent a percentage or remaining
-time when Engine has not reported a total. Older runtimes can report fewer
-stages. Build errors retain Engine's explanation; timeout or interruption stops
+time when Engine has not reported a total. Build errors retain Engine's explanation; timeout or interruption stops
 the build processes and closes the display. Progress defaults to `False` and
 does not add work to Route or Matrix calls.
 
@@ -136,7 +135,7 @@ Matrix requires advertised resident execution. Supplied traffic for Drive Route/
 
 With the bundled engine, all Route modes (including waypoints and supplied traffic), Matrix, and Reach share resident processes by service date. A City keeps one to four processes according to CPU and physical memory. Changing dates reclaims the least recently used idle process. Active queries finish before eviction or `City.close()` releases their process.
 
-Older external engines without the new resident capabilities retain one-shot invocation for Walk, Drive, waypoint/Scenario Route, and Reach. Simple transit Route and Matrix retain their existing resident protocol. Opening several City objects does not share their routing processes.
+VIGO Python 0.5 requires Engine 0.5. All queries use the documented `stream` protocol. Detailed Python Results request its explicit trace output. Opening several City objects does not share their routing processes.
 
 For repeated work, reuse one City in a context manager. Route answers are recomputed for every call. `disable_cache=True` on transit Route or Matrix disables street-access and reconstructed walking-path caches while leaving the prepared network resident.
 

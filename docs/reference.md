@@ -137,7 +137,7 @@ Depart-at minimizes arrival time, then boardings, then walking. Arrive-by maximi
 waypoints is currently unsupported. The runtime must advertise transfer-cap
 support; Python rejects this option on older runtimes instead of ignoring it.
 
-With the bundled engine, Route, Matrix, and Reach reuse resident processes by service date. Route answers themselves are recomputed. See [process lifetime](runtime.md#keep-a-city-open) for older-runtime fallback and concurrency behavior.
+With the bundled engine, Route, Matrix, and Reach reuse resident processes by service date. Route answers themselves are recomputed. See [process lifetime](runtime.md#keep-a-city-open) for concurrency and resource lifetime.
 
 For transit Route and Matrix measurements, `disable_cache=True` disables
 street-access frontier and reconstructed walking-path caches. It keeps the

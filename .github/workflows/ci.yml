@@ -115,4 +115,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --prerelease --title "VIGO Python ${{ github.ref_name }}" --notes-file docs/releases/0.4.2.md
+        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --prerelease --title "VIGO Python ${{ github.ref_name }}" --notes-file docs/releases/0.5.0.md

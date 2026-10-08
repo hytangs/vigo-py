@@ -22,7 +22,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 args = sys.argv[1:]
 if args == ["--version"]:
-    print("0.3.7")
+    print("0.5.0")
     raise SystemExit
 if args == ["--help"]:
     print("vigo build\nvigo capabilities\nvigo inspect\nvigo route\nvigo matrix\nvigo reach\nvigo compare")
@@ -30,14 +30,14 @@ if args == ["--help"]:
 if args == ["capabilities"]:
     print(json.dumps({
         "schemaVersion": "vigo.capabilities.v3",
-        "productVersion": "0.3.7",
+        "productVersion": "0.5.0",
         "apiVersion": "1.1",
         "cityFormatVersion": 1,
         "city": {"privateAccess": ["public", "endpoints"]},
         "resultSchemaVersion": 1,
-        "publicCliCommands": ["build", "capabilities", "inspect", "route", "matrix", "reach", "compare"],
+        "publicCliCommands": ["build", "capabilities", "inspect", "route", "matrix", "reach", "stream", "compare"],
         "queries": [
-            {"id": "route", "transitStreetCacheControl": True, "maxTransfers": {"min": 0, "max": 31, "default": None}},
+            {"id": "route", "resident": True, "transitStreetCacheControl": True, "maxTransfers": {"min": 0, "max": 31, "default": None}},
             {"id": "matrix", "resident": True, "journeys": True,
              "transitStreetCacheControl": True,
              "maxTransfers": {"min": 0, "max": 31, "default": None},
@@ -65,108 +65,43 @@ if command == "build":
     }
     (city / "network.json").write_text(json.dumps(manifest))
     print(json.dumps(manifest))
-elif command == "_route-stream":
+elif command == "stream":
+    if options.get("diagnostics") != "trace":
+        raise SystemExit("Python must request detailed Results explicitly")
     for line in sys.stdin:
         request = json.loads(line)
-        if request.get("kind") == "matrix":
-            rows = [{
+        kind = request["kind"]
+        response = {
+            "schemaVersion": f"vigo.result.{kind}.v1", "productVersion": "0.5.0",
+            "apiVersion": "1.1", "resultSchemaVersion": 1, "id": request["id"],
+            "kind": kind, "status": "ready", "query": {**request, "serviceDate": options["service-date"]}, "warnings": [],
+            "timing": {"computeMs": 1.0},
+        }
+        if kind == "matrix":
+            response["rows"] = [{
                 "originIndex": i, "destinationIndex": j,
                 "originId": origin["id"], "destinationId": destination["id"],
                 "status": "ready", "durationMinutes": 10 + i + j,
             } for i, origin in enumerate(request["origins"]) for j, destination in enumerate(request["destinations"])]
-            print(json.dumps({
-                "schemaVersion": "vigo.result.matrix.v1", "productVersion": "0.3.7",
-                "apiVersion": "1.1", "resultSchemaVersion": 1, "id": request["id"],
-                "kind": "matrix", "status": "ready", "query": request, "rows": rows,
-                "warnings": [], "timing": {"computeMs": 1.0},
-            }), flush=True)
-            continue
-        unexpected = set(request) - {
-            "id", "origin", "destination", "mode", "time", "timePreference",
-            "objective", "maxWalkKm", "maxTransfers", "departureWindowMinutes", "waypoints",
-            "requireTransitRide", "horizonMinutes", "disableCache",
-        }
-        if unexpected:
-            raise SystemExit(f"unexpected route fields: {sorted(unexpected)}")
-        plan = {
-            "status": "ready",
-            "durationMinutes": 12.5,
-            "transfers": 0,
-            "legs": [{"type": "ride", "coordinates": [[0, 0], [1, 1]]}],
-        }
-        response = {
-            "schemaVersion": "vigo.result.route.v1",
-            "productVersion": "0.3.7",
-            "apiVersion": "1.1",
-            "resultSchemaVersion": 1,
-            "id": request["id"],
-            "status": "ok",
-            "routingStatus": "ready",
-            "plan": plan,
-            "timing": {"requestMs": 1.0},
-        }
-        if request["origin"] == "JSON":
-            plan["title"] = 'Station \u2014 \u5317 "A"'
-            response = {"plan": plan, **response}
-            print(json.dumps(response, ensure_ascii=False, separators=(",", ":")), flush=True)
+        elif kind == "reach":
+            size = request["rasterSize"]
+            response["surface"] = {"width": size, "height": size, "values": [1] * (size * size)}
+            response["contours"] = {"type": "FeatureCollection", "features": []}
+        elif kind == "route":
+            unexpected = set(request) - {
+                "id", "kind", "origin", "destination", "mode", "time", "timePreference",
+                "objective", "maxWalkKm", "maxTransfers", "departureWindowMinutes", "waypoints",
+                "requireTransitRide", "horizonMinutes", "disableCache",
+            }
+            if unexpected:
+                raise SystemExit(f"unexpected route fields: {sorted(unexpected)}")
+            response["result"] = {"status": "ready", "durationMinutes": 8 if request.get("waypoints") else 12.5,
+                "transfers": 0, "legs": [{"type": "ride", "coordinates": [[0, 0], [1, 1]]}]}
+            if request["origin"] == "JSON":
+                response["result"]["title"] = 'Station — 北 "A"'
         else:
-            print(json.dumps(response), flush=True)
-elif command == "route":
-    print(json.dumps({
-        "schemaVersion": "vigo.result.route.v1",
-        "productVersion": "0.3.7",
-        "apiVersion": "1.1",
-        "resultSchemaVersion": 1,
-        "kind": "route",
-        "status": "ready",
-        "query": {},
-        "result": {"status": "ready", "durationMinutes": 8, "transfers": 0, "legs": []},
-        "warnings": [],
-        "timing": {"computeMs": 1.0},
-    }))
-elif command == "matrix":
-    request = json.loads(pathlib.Path(options["request"]).read_text())
-    request["timePreference"] = options["time-preference"]
-    request["time"] = options["time"]
-    rows = []
-    for origin_index, origin in enumerate(request["origins"]):
-        for destination_index, destination in enumerate(request["destinations"]):
-            rows.append({
-                "originIndex": origin_index,
-                "destinationIndex": destination_index,
-                "originId": origin["id"],
-                "destinationId": destination["id"],
-                "status": "ready",
-                "durationMinutes": 10 + origin_index + destination_index,
-            })
-    print(json.dumps({
-        "schemaVersion": "vigo.result.matrix.v1",
-        "productVersion": "0.3.7",
-        "apiVersion": "1.1",
-        "resultSchemaVersion": 1,
-        "kind": "matrix",
-        "status": "ready",
-        "query": request,
-        "rows": rows,
-        "warnings": [],
-        "timing": {"queryMs": 1.0},
-    }))
-elif command == "reach":
-    request = json.loads(pathlib.Path(options["request"]).read_text())
-    size = request["rasterSize"]
-    print(json.dumps({
-        "schemaVersion": "vigo.result.reach.v1",
-        "productVersion": "0.3.7",
-        "apiVersion": "1.1",
-        "resultSchemaVersion": 1,
-        "kind": "reach",
-        "status": "ready",
-        "query": request,
-        "surface": {"width": size, "height": size, "values": [1] * (size * size)},
-        "contours": {"type": "FeatureCollection", "features": []},
-        "warnings": [],
-        "timing": {"queryMs": 1.0},
-    }))
+            raise SystemExit("unknown query")
+        print(json.dumps({"schema": f"vigo.{kind}.v1", "status": "ok", "id": request["id"], "trace": response}, ensure_ascii=False), flush=True)
 else:
     raise SystemExit(2)
 """
@@ -273,10 +208,15 @@ class VigoPythonTest(unittest.TestCase):
             second = vigo.resolve_runtime(self.command)
             self.assertTrue(second.capabilities["queries"])
             self.assertEqual(run.call_count, 1)
-            self.cli.write_text(self.cli.read_text().replace('"0.3.7"', '"0.3.8"'))
+            self.cli.write_text(self.cli.read_text().replace('"0.5.0"', '"0.5.1"'))
             changed = vigo.resolve_runtime(self.command)
-            self.assertEqual(changed.product_version, "0.3.8")
+            self.assertEqual(changed.product_version, "0.5.1")
             self.assertEqual(run.call_count, 2)
+
+    def test_old_runtime_requires_current_engine(self) -> None:
+        self.cli.write_text(self.cli.read_text().replace('"0.5.0"', '"0.4.4"'))
+        with self.assertRaisesRegex(vigo.VigoError, "VIGO 0.5 runtime"):
+            vigo.resolve_runtime(self.command)
 
     def test_failed_runtime_handshake_is_not_cached(self) -> None:
         from vigo.runtime import _run
@@ -285,7 +225,7 @@ class VigoPythonTest(unittest.TestCase):
                                                    _run(self.command, "capabilities")]) as run:
             with self.assertRaises(vigo.VigoError):
                 vigo.resolve_runtime(self.command)
-            self.assertEqual(vigo.resolve_runtime(self.command).product_version, "0.3.7")
+            self.assertEqual(vigo.resolve_runtime(self.command).product_version, "0.5.0")
             self.assertEqual(run.call_count, 2)
 
     def test_city_has_one_query_model(self) -> None:
@@ -335,20 +275,18 @@ class VigoPythonTest(unittest.TestCase):
         self.assertEqual(json.loads(route.export(self.root / "route.json").read_text()), expected)
         self.assertEqual(route.duration_minutes, 12.5)
 
-    def test_native_plan_json_survives_export_and_independent_mutation(self) -> None:
+    def test_route_json_preserves_unicode_and_independent_mutation(self) -> None:
         with vigo.open(self.city_path, runtime=self.command) as city:
             route = city.route("JSON", "B", depart_at="08:00", service_date="2026-09-04")
-            legacy = city.route("A", "B", depart_at="08:00", service_date="2026-09-04")
-        self.assertIsNotNone(route._plan_json)
-        self.assertIsNone(legacy._plan_json)
+            second = city.route("A", "B", depart_at="08:00", service_date="2026-09-04")
         expected = route.to_dict()
         route.value["legs"][0]["coordinates"][0][0] = 99
         route.legs[0]["coordinates"].clear()
         route.to_dict()["result"]["title"] = "changed"
         self.assertEqual(json.loads(route.to_json(indent=None)), expected)
         self.assertEqual(json.loads(route.to_json()), expected)
-        self.assertIn('Station \u2014 \u5317', route.to_json(indent=None))
-        self.assertEqual(json.loads(legacy.to_json(indent=None)), legacy.to_dict())
+        self.assertIn('Station — 北', json.loads(route.to_json(indent=None))['result']['title'])
+        self.assertEqual(json.loads(second.to_json(indent=None)), second.to_dict())
 
     def test_direct_walking_is_the_default_across_query_types(self) -> None:
         self.assertFalse(vigo.Route("A", "B").require_transit_ride)
@@ -428,7 +366,7 @@ class VigoPythonTest(unittest.TestCase):
         output = self.root / "built-city"
         with vigo.build(output, gtfs=gtfs, osm=osm, runtime=self.command) as city:
             self.assertEqual(city.revision_id, "20260904T120000-001Z")
-            self.assertEqual(city.runtime.product_version, "0.3.7")
+            self.assertEqual(city.runtime.product_version, "0.5.0")
             self.assertEqual(city.runtime.api_version, "1.1")
             self.assertTrue((output / "routing" / "project.sqlite").is_file())
             self.assertTrue((output / "osm" / "street-index.sqlite").is_file())

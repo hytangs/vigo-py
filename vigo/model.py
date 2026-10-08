@@ -258,11 +258,8 @@ def _json_command(
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix=f"vigo-{name}-") as temporary:
         request_path = Path(temporary) / "request.json"
-        # Public CLI results are compact. The Python Result API retains its
-        # detailed witness until its own schema migration; request it explicitly.
-        output_request = dict(request)
-        if "trace" in runtime.capabilities.get("output", {}).get("diagnostics", ()):
-            output_request["diagnostics"] = "trace"
+        # Detailed Python Results use the current API's explicit trace channel.
+        output_request = {**request, "diagnostics": "trace"}
         request_path.write_text(json.dumps(output_request, allow_nan=False), encoding="utf-8")
         output = run_json(
             runtime,
@@ -276,7 +273,9 @@ def _json_command(
     if not isinstance(payload, dict):
         raise VigoError(f"VIGO {name} returned an invalid Result")
     trace = payload.get("trace")
-    return trace if isinstance(trace, dict) else payload
+    if not isinstance(trace, dict):
+        raise VigoError("VIGO returned no detailed Result")
+    return trace
 
 
 class _RouteStream:
@@ -290,7 +289,8 @@ class _RouteStream:
         self._process = subprocess.Popen(
             [
                 *city.runtime.command,
-                "_route-stream",
+                "stream",
+                "--diagnostics=trace",
                 f"--city={city.path}",
                 f"--service-date={service_date}",
                 f"--service-day={_service_day(service_date)}",
@@ -320,19 +320,10 @@ class _RouteStream:
 
     def _read(self) -> None:
         assert self._process.stdout is not None
-        decoder = json.JSONDecoder()
         try:
             for line in self._process.stdout:
                 try:
-                    if line.startswith('{"plan":'):
-                        # Decode the native plan once. Its retained JSON can be
-                        # exported without re-encoding every geometry number.
-                        plan, end = decoder.raw_decode(line, len('{"plan":'))
-                        value = json.loads("{" + line[end + 1:])
-                        value["plan"] = plan
-                        value["_plan_json"] = line[len('{"plan":'):end]
-                    else:
-                        value = json.loads(line)
+                    value = json.loads(line)
                     if not isinstance(value, dict):
                         raise TypeError("route stream returned a non-object")
                     self._responses.put(value)
@@ -381,7 +372,10 @@ class _RouteStream:
                 raise VigoError(
                     str(response.get("error", {}).get("message", "Route failed"))
                 )
-            return response
+            trace = response.get("trace")
+            if not isinstance(trace, dict):
+                raise VigoError("VIGO returned no detailed Result")
+            return trace
 
     def close(self) -> None:
         with self._lock:
@@ -425,7 +419,6 @@ class Result:
     _payload: Mapping[str, Any] = field(repr=False)
     city_revision_id: str | None
     scenario_name: str | None = None
-    _plan_json: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self._payload.get("resultSchemaVersion") != RESULT_SCHEMA_VERSION:
@@ -435,10 +428,7 @@ class Result:
 
     @property
     def status(self) -> str:
-        value = self._payload.get("status")
-        if value == "ok":
-            return str(self._payload.get("routingStatus", "ready"))
-        return str(value or "ready")
+        return str(self._payload.get("status"))
 
     @property
     def warnings(self) -> tuple[Any, ...]:
@@ -456,7 +446,7 @@ class Result:
     @property
     def value(self) -> Any:
         if self.kind == "route":
-            return copy.deepcopy(self._payload.get("result", self._payload.get("plan")))
+            return copy.deepcopy(self._payload.get("result"))
         if self.kind == "matrix":
             return copy.deepcopy(self._payload.get("rows", []))
         if self.kind == "reach":
@@ -469,13 +459,13 @@ class Result:
 
     @property
     def duration_minutes(self) -> float | None:
-        route = self._payload.get("result", self._payload.get("plan")) if self.kind == "route" else None
+        route = self._payload.get("result") if self.kind == "route" else None
         value = route.get("durationMinutes") if isinstance(route, Mapping) else None
         return None if value is None else float(value)
 
     @property
     def legs(self) -> tuple[dict[str, Any], ...]:
-        route = self._payload.get("result", self._payload.get("plan")) if self.kind == "route" else None
+        route = self._payload.get("result") if self.kind == "route" else None
         return (
             tuple(copy.deepcopy(leg) for leg in route.get("legs", ()))
             if isinstance(route, Mapping)
@@ -497,10 +487,6 @@ class Result:
         return copy.deepcopy(dict(self._payload))
 
     def to_json(self, *, indent: int | None = 2) -> str:
-        if indent is None and self._plan_json is not None:
-            envelope = {key: value for key, value in self._payload.items() if key != "result"}
-            encoded = json.dumps(envelope, allow_nan=False, separators=(",", ":"))
-            return encoded[:-1] + ',"result":' + self._plan_json + "}"
         return json.dumps(dict(self._payload), indent=indent, allow_nan=False,
                           separators=(",", ":") if indent is None else None)
 
@@ -512,7 +498,7 @@ class Result:
             )
         if self.kind == "route":
             features = []
-            route = self._payload.get("result", self._payload.get("plan")) or {}
+            route = self._payload.get("result") or {}
             for index, leg in enumerate(route.get("legs", ())):
                 coordinates = leg.get("coordinates")
                 if isinstance(coordinates, list) and len(coordinates) >= 2:
@@ -821,7 +807,6 @@ class City:
 
     def _route(self, query: Route, scenario: Scenario | None) -> Result:
         started = time.perf_counter()
-        plan_json = None
         selected_time = (
             query.arrive_by if query.arrive_by is not None else query.depart_at
         )
@@ -846,53 +831,8 @@ class City:
                 else {}
             ),
         }
-        if self._query_capability("route").get("resident"):
-            with self._stream(service_date) as stream:
-                payload = stream.route({"kind": "route", **request})
-        elif query.mode == "transit" and scenario is None and not query.waypoints:
-            with self._stream(service_date) as stream:
-                response = stream.route(request)
-            timing = response.get("timing", {})
-            plan_json = response.get("_plan_json")
-            payload = {
-                "schemaVersion": "vigo.result.route.v1",
-                "productVersion": self.runtime.product_version,
-                "apiVersion": self.runtime.api_version,
-                "resultSchemaVersion": RESULT_SCHEMA_VERSION,
-                "kind": "route",
-                "status": response.get("routingStatus", "ready"),
-                "query": {
-                    **request,
-                    "serviceDate": service_date,
-                    "serviceDay": _service_day(service_date),
-                },
-                "result": response.get("plan"),
-                "warnings": [],
-                "timing": {
-                    **timing,
-                    "openMs": timing.get("openMs", timing.get("preparationMs", 0)),
-                    "computeMs": timing.get(
-                        "computeMs", timing.get("routeMs", timing.get("requestMs"))
-                    ),
-                },
-            }
-        else:
-            payload = _json_command(
-                self.runtime,
-                self.path,
-                "route",
-                request,
-                [
-                    f"--mode={query.mode}",
-                    f"--time={clock}",
-                    f"--time-preference={'arrive' if query.arrive_by is not None else 'depart'}",
-                    f"--service-date={service_date}",
-                    f"--max-walk={query.max_walk_km:g}",
-                    f"--departure-window={query.departure_window_minutes}",
-                    f"--objective={query.objective}",
-                ],
-                self.timeout,
-            )
+        with self._stream(service_date) as stream:
+            payload = stream.route({"kind": "route", **request})
         payload.setdefault("timing", {})["endToEndMs"] = round(
             (time.perf_counter() - started) * 1000, 3
         )
@@ -901,7 +841,6 @@ class City:
             MappingProxyType(payload),
             self.revision_id,
             scenario.name if scenario else None,
-            _plan_json=plan_json,
         )
 
     def _matrix(self, query: Matrix, scenario: Scenario | None) -> Result:
@@ -971,26 +910,8 @@ class City:
                 else {}
             ),
         }
-        if self._query_capability("reach").get("resident"):
-            with self._stream(service_date) as stream:
-                payload = stream.route({"kind": "reach", **request})
-        else:
-            payload = _json_command(
-                self.runtime,
-                self.path,
-                "reach",
-                request,
-                [
-                    f"--time={clock}",
-                    f"--service-date={service_date}",
-                    f"--max-walk={query.max_walk_km:g}",
-                    f"--walk-speed={query.walk_speed_kph:g}",
-                    f"--extent-radius={query.extent_radius_km:g}",
-                    f"--raster-size={query.raster_size}",
-                    f"--cutoffs={','.join(f'{value:g}' for value in query.cutoffs_minutes)}",
-                ],
-                self.timeout,
-            )
+        with self._stream(service_date) as stream:
+            payload = stream.route({"kind": "reach", **request})
         payload.setdefault("timing", {})["endToEndMs"] = round(
             (time.perf_counter() - started) * 1000, 3
         )

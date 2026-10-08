@@ -12,7 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
-VERSION = "0.4.2"
+VERSION = "0.5.0"
 API_VERSION = "1.0"
 CITY_FORMAT_VERSION = 1
 RESULT_SCHEMA_VERSION = 1
@@ -24,6 +24,7 @@ PUBLIC_COMMANDS = (
     "route",
     "matrix",
     "reach",
+    "stream",
     "compare",
 )
 
@@ -247,6 +248,7 @@ def _runtime_capabilities(
     if (
         not isinstance(capabilities, dict)
         or not _compatible_api(capabilities.get("apiVersion"))
+        or not re.match(r"^0\.5\.\d+(?:$|[-+])", str(capabilities.get("productVersion", "")))
         or capabilities.get("cityFormatVersion") != CITY_FORMAT_VERSION
         or capabilities.get("resultSchemaVersion") != RESULT_SCHEMA_VERSION
         or not isinstance(capabilities.get("publicCliCommands"), list)
@@ -254,7 +256,7 @@ def _runtime_capabilities(
             name not in capabilities["publicCliCommands"] for name in PUBLIC_COMMANDS
         )
     ):
-        raise VigoError("Runtime does not advertise a compatible VIGO API")
+        raise VigoError("VIGO Python 0.5 requires a VIGO 0.5 runtime and the current stream API")
     return capabilities
 
 
@@ -289,8 +291,8 @@ def resolve_runtime(
 
     detail = f" Checked: {', '.join(failures)}." if failures else ""
     raise VigoError(
-        f"No VIGO runtime compatible with API {API_VERSION} is available. "
-        "Install a VIGO platform wheel or set VIGO_RUNTIME to a compatible headless runtime." + detail
+        "No VIGO 0.5 runtime with the current stream API is available. "
+        "Install a VIGO 0.5 platform wheel or set VIGO_RUNTIME to an Engine 0.5 runtime." + detail
     )
 
 
