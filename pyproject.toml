@@ -30,6 +30,7 @@ Issues = "https://github.com/hytangs/vigo-py/issues"
 
 [project.optional-dependencies]
 progress = ["tqdm>=4.66"]
+speed = ["orjson>=3.10,<4"]
 
 [tool.setuptools.packages.find]
 include = ["vigo*"]

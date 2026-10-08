@@ -2,7 +2,7 @@
 
 Build a transport model once. Query journeys, travel-time matrices, and reachable areas from Python.
 
-The package imports as `vigo` and uses the shared [VIGO Engine](https://github.com/hytangs/vigo). Studio provides the desktop interface; Python provides the same City and Query model for scripts and notebooks. Version 0.5.0 requires Engine 0.5 and uses its documented resident `stream` protocol for Route, Matrix, and Reach. Older runtime fallbacks and the hidden stream protocol are removed. Rebuild prepared Cities with Engine 0.5.
+The package imports as `vigo` and uses the shared [VIGO Engine](https://github.com/hytangs/vigo). Studio provides the desktop interface; Python provides the same City and Query model for scripts and notebooks. Version 0.5.0 requires Engine 0.5 and uses its documented resident `stream` protocol for Route, Matrix, and Reach. Rebuild prepared Cities with Engine 0.5.
 
 ```text
 GTFS + OSM -> City -> Route | Matrix | Reach -> Result
@@ -23,6 +23,11 @@ The platform wheel includes Node, the headless Engine bundle, and the Rust routi
 Source installs remain lightweight and require an explicit compatible Engine installation. Maintainers can [build a self-contained wheel](CONTRIBUTING.md#build-a-headless-wheel) from the two public repositories. External runtimes remain available through `runtime=`, `VIGO_RUNTIME`, or `VIGO_APP`.
 
 See [Runtime and loading](docs/runtime.md) for platform requirements, runtime selection, and process reuse.
+
+For faster decoding of large Matrix and Reach responses, install the optional
+`speed` extra: `python -m pip install ".[speed]"` from a source checkout, or
+append `[speed]` to the quoted platform wheel path when installing it. This adds
+`orjson`; the base package still works without Python dependencies.
 
 ## Open and query
 

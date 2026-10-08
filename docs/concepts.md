@@ -102,7 +102,7 @@ with vigo.open("./city") as city:
 
 The VIGO command line uses the same nouns: `vigo build`, `vigo inspect`, `vigo route`, `vigo matrix`, `vigo reach`, and `vigo compare`.
 
-`vigo capabilities` reports the public API version and supported combinations. Python accepts a compatible API major version; it does not require the same product patch version.
+`vigo capabilities` reports the public API version and supported combinations. Python requires Engine 0.5.x with API 1.0, capability schema v3, and trace output. Runtime selection rejects other API versions and capability schemas.
 
 `Route` and `Matrix` accept `max_transfers=0` for at most one boarding,
 `max_transfers=1` for at most two, and so on through 31. Omit the option

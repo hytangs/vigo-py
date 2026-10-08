@@ -111,7 +111,7 @@ Selection follows this order:
 4. Installed `VIGO Studio.app` locations on macOS.
 5. `vigo` on `PATH`.
 
-An invalid explicit setting fails rather than selecting another engine. Once a complete bundled layout is selected, a failed capability check also ends discovery. Sibling source checkouts are not discovered implicitly. Python requires API 1.x, City format 1, Result schema 1, and the public commands; product versions may differ.
+An invalid explicit setting fails rather than selecting another engine. Once a complete bundled layout is selected, a failed capability check also ends discovery. Sibling source checkouts are not discovered implicitly. Python requires Engine 0.5.x, API 1.0, capability schema v3, City format 1, Result schema 1, the public commands, and advertised trace output. Other API versions and capability schemas are rejected at runtime selection.
 
 Use a path for a complete runtime directory or executable. Use an argument sequence for a custom command; a shell command string is not split into executable and arguments:
 
@@ -125,11 +125,11 @@ Selecting a source `vigo.mjs` file uses system Node. Build its compatible native
 
 Platform wheels include a private Node 24.18.0 executable, `vigo.mjs`, the native kernel, license notices, and a checksum manifest. Supported build targets are macOS 14+ ARM64/x64, Linux ARM64/x64 with glibc 2.39+ (Ubuntu 24.04 builders), and Windows x64. A wheel must match the target OS and CPU. Source installs and universal development wheels need an external runtime. No import-time or query-time downloads occur.
 
-A headless runtime directory can also be passed to `runtime=`. Keep its files together. For Studio compatibility, use a complete macOS `.app`, extracted Studio distribution, or packaged executable with its `resources` directory. Bundled/headless child processes inherit only OS paths and locale settings; provider secrets, Node injection options, and foreign kernel overrides are excluded. Explicit external commands retain the caller's environment.
+A headless runtime directory can also be passed to `runtime=`. Keep its files together. To use Studio as the runtime, select a complete macOS `.app`, extracted Studio distribution, or packaged executable with its `resources` directory. Bundled/headless child processes inherit only OS paths and locale settings; provider secrets, Node injection options, and foreign kernel overrides are excluded. Explicit external commands retain the caller's environment.
 
 Successful capability checks are retained for up to eight runtime identities. Each lookup checks the command files' and explicitly selected native kernel's metadata, so replacing or rebuilding the runtime triggers a new check. Failed checks are not cached. Returned capability dictionaries are independent copies. Pass a previously resolved `RuntimeInfo` to reuse that selection explicitly.
 
-Matrix requires advertised resident execution. Supplied traffic for Drive Route/Matrix requires the corresponding advertised capability; traffic is sent in explicit realtime mode. Transfer caps, arrive-by Matrix, journey output, and transit cache controls also require their advertised capabilities. Unsupported combinations raise `UnsupportedQuery`; Python does not silently ignore these options or fall back to the retired one-shot Matrix path.
+Matrix requires advertised resident execution. Supplied traffic for Drive Route/Matrix requires the corresponding advertised capability; traffic is sent in explicit realtime mode. Transfer caps, arrive-by Matrix, journey output, and transit cache controls also require their advertised capabilities. Unsupported combinations raise `UnsupportedQuery`; Python validates these options before sending each query to the resident stream.
 
 ## Keep a City open
 
@@ -149,13 +149,33 @@ Requests for the same service date share and serialize access to its process. Di
 
 If importing the package exposes none of the documented functions, inspect `vigo.__file__` and the active interpreter. A local directory named `vigo` can shadow the installed package. Install into the intended interpreter and restart the Python session after correcting its import path.
 
+## Reduce Python overhead
+
+Install `python -m pip install ".[speed]"` from this checkout to enable optional
+`orjson` decoding of resident responses. Without it, Python uses the standard
+JSON decoder. Request encoding and exports retain strict finite-number checks
+and existing formatting. Decoding acceleration does not change routing or
+cache policy. The detailed trace is still requested to preserve Result fields.
+
+Result access copies JSON containers while reusing immutable scalar values.
+For large matrices, consume `result.iter_rows()` to avoid copying rows you do
+not need. CSV export writes stored rows without first copying the full matrix.
+Use `include_journeys=False` and `include_geometry=False` when only travel
+times are needed; these remain the Matrix defaults. Reuse an open City.
+
+Run `python scripts/benchmark-wrapper.py` from the checkout to compare the old
+generic row-copy operation with current Result access and compare standard
+JSON decoding with the installed decoder. This synthetic benchmark excludes
+Engine computation, process communication, and City loading. It is not a
+routing speedup claim.
+
 ## Measure the complete operation
 
 Record `vigo.open()` separately from the first Query: most native loading occurs during that Query. `Result.timing` distinguishes runtime opening and computation where available. For Route, Matrix, and Reach, `endToEndMs` includes Python request preparation and the runtime response, through payload decoding; Result construction and export occur afterwards. Use an outer wall-clock measurement when including those stages.
 
 Compare first-query and repeated-query durations on the same City, service date, query options, and output detail. Native `engineQueryMs` excludes parts of access, geometry, communication, and Python work; it is not full-route throughput. Count ready Results, blocked Results, setup failures, and query exceptions separately.
 
-Keep `require_transit_ride` explicit when comparing older results: the current
+Keep `require_transit_ride` explicit when comparing results: the current
 default is `False`, which allows a direct walk to compete with transit. Set `True` to require a boarding. Match
 `disable_cache`, date, walking budget, coordinates, and output detail before
 attributing a latency difference to a version change. A sub-millisecond native

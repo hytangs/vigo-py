@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Remove the unused production one-shot query helper and use one query stream for Route, Matrix, and Reach.
+- Require the current Engine API and trace capabilities; remove obsolete point-shape handling, index-only Matrix comparison, and non-JSON Result-copy fallback.
+
+- Align with Engine 0.5 walking Reach, surface sampling, reached street edges, and structured Matrix stop references.
+- Reduce Result copy overhead, add incremental `iter_rows()`, and export CSV without duplicating the matrix.
+- Add optional `speed` installation extra for accelerated resident-response JSON decoding and a reproducible wrapper benchmark.
+
 - Compare direct walking by default in Route and Matrix; `require_transit_ride=True` retains a boarding requirement.
 - Isolate packaged Studio runtime launches from host Node options, module paths, and library injection settings, as for bundled headless runtimes.
 - Preserve detailed journey results consistently in resident and one-shot calls to engines that use the compact public result format.

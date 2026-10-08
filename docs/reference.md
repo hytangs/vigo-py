@@ -67,7 +67,7 @@ pass `private_access="endpoints"` to `vigo.build()`. The default is `"public"`.
 The endpoint model includes mapped private access walks within the walking budget;
 the public middle of a journey and transit transfers cannot use private shortcuts.
 It assumes endpoint authorization and does not infer ownership or gate hours.
-An older runtime that lacks this feature is rejected before Build.
+The runtime must advertise endpoint access before Build.
 
 `timeout` here bounds the build command. The returned City uses the default 120-second Query timeout; reopen it with `vigo.open(..., timeout=...)` when longer Query limits are needed. Runtime discovery and capability checks have their own limits. See [Runtime and loading](runtime.md).
 
@@ -76,12 +76,15 @@ An older runtime that lacks this feature is rejected before Build.
 | Input | Example | Meaning |
 | --- | --- | --- |
 | Stop ID | `"A"` or `{"stopId": "A"}` | Exact ID in this City; no name lookup or geocoding |
+| Structured stop | `{"stop": {"id": "A", "feed": "feed-id"}}` | Public Engine stop reference; omit `feed` for an unambiguous stop |
 | Coordinate pair | `[-71.062, 42.356]` | Longitude, then latitude |
 | Coordinate mapping | `{"coordinate": [-71.062, 42.356]}` | Explicit point object |
 | Matrix point set | `{"home": [-71.062, 42.356]}` | Caller ID mapped to a point |
 | Matrix point sequence | `["A", "B"]` | Auto-generated IDs such as `origin_1` and `origin_2` |
 
-A numeric pair is one coordinate point, not two Matrix endpoints. A mapping with a point key such as `stopId` or `coordinate` is one point, not an ID-to-point set. Use descriptive, unique caller IDs for Matrix sets. The complete [Engine point contract](https://github.com/hytangs/vigo/blob/main/docs/reference/routing.md) describes stop access semantics.
+Point mappings use the Engine fields `stop`, `stopId`, or `coordinate`. Use `[longitude, latitude]` or a `coordinate` mapping for coordinates. Python does not interpret `stop_id`, `lat`, `lon`, or `lng` as point aliases.
+
+A numeric pair is one coordinate point, not two Matrix endpoints. A mapping with a point key such as `stop`, `stopId`, or `coordinate` is one point, not an ID-to-point set. Use descriptive, unique caller IDs for Matrix sets. The complete [Engine point contract](https://github.com/hytangs/vigo/blob/main/docs/reference/routing.md) describes stop access semantics.
 
 Time arguments accept `HH:MM`, `datetime.time`, or `datetime.datetime`. A datetime supplies its date unless an explicit `service_date` overrides it. Datetime timezone information is not converted; seconds are omitted. Pass a clock already expressed in the feed's local service time.
 
@@ -135,14 +138,14 @@ Depart-at minimizes arrival time, then boardings, then walking. Arrive-by maximi
 (or use `None`) for no additional cap. It applies to both `depart_at` and
 `arrive_by` and all Matrix shapes. A finite cap with ordered transit
 waypoints is currently unsupported. The runtime must advertise transfer-cap
-support; Python rejects this option on older runtimes instead of ignoring it.
+support; Python rejects this option when its capability is absent.
 
 With the bundled engine, Route, Matrix, and Reach reuse resident processes by service date. Route answers themselves are recomputed. See [process lifetime](runtime.md#keep-a-city-open) for concurrency and resource lifetime.
 
 For transit Route and Matrix measurements, `disable_cache=True` disables
 street-access frontier and reconstructed walking-path caches. It keeps the
 prepared City resident. Python requires the runtime to advertise this control;
-older runtimes are rejected instead of silently ignoring it. `Result.to_json(indent=None)`
+a missing capability raises `UnsupportedQuery`. `Result.to_json(indent=None)`
 returns compact JSON, including the complete itinerary and geometry.
 
 ## Matrix
@@ -189,8 +192,8 @@ runtime whose Matrix capabilities include `arrive_by`.
 Successive Matrix and transit Route queries on the same City and service date
 reuse one resident process. Keep the City open while iterating over schools so
 the network is loaded once. Closing the City releases those processes. Matrix
-requires a runtime that advertises resident Matrix support; older runtimes
-raise `UnsupportedQuery` before execution.
+requires a runtime that advertises resident Matrix support; a missing capability
+raises `UnsupportedQuery` before execution.
 
 For transit matrices, `include_journeys=True` adds actual arrival, walking,
 waiting, ride time, transfers, and timed trip/stop legs to each ready row's
@@ -204,10 +207,13 @@ the nested journey reports actual arrival.
 
 Reach answers where the modeled network can travel within stated time limits. It does not count people, jobs, schools, or other opportunities.
 
-Reach accepts `origin`, `service_date`, and `depart_at` (default `"08:00"`). It uses scheduled transit with walking; walking-only and driving Reach are unavailable.
+Reach accepts `origin`, `service_date`, and `depart_at` (default `"08:00"`). It supports scheduled transit with walking and walking-only Reach. Driving Reach is unavailable.
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
+| `mode` | `"transit"` | `"transit"` or `"walk"`; walking requires advertised runtime support |
+| `surface_sampling` | `"street"` | `"street"` for reachable network edges, or `"cell-center"` for coordinate cell centers |
+| `include_street_edges` | `False` | Include reached street edges in the surface; adds output size |
 | `cutoffs_minutes` | `(15, 30, 45, 60)` | Increasing cutoffs, each 5–240 minutes |
 | `max_walk_km` | `1.2` | Transit access and terminal walking budget |
 | `walk_speed_kph` | `4.8` | Walking speed, 1–8 kph |
@@ -237,7 +243,7 @@ Use the word Accessibility only when a separate analysis combines travel impedan
 | Scenario state | Supported Python Queries |
 | --- | --- |
 | No changes | The City's supported Queries |
-| `services` and/or `without_routes` | Scheduled Reach |
+| `services` and/or `without_routes` | Transit Reach; walking-only Reach rejects planned transit changes |
 | `traffic` | Drive Route and Matrix, with advertised supplied-traffic capability |
 | `live` | Unavailable through Python |
 | Combined planned, live, or traffic states | Unsupported |
@@ -272,9 +278,9 @@ result.record
 result.export("result.json")
 ```
 
-Route Results add `duration_minutes` and `legs`. Matrix Results add `rows`. Both Route and Reach support `to_geojson()`. `value` exposes the family-specific answer; `to_dict()` returns the complete Engine payload.
+Route Results add `duration_minutes` and `legs`. Matrix Results add `rows` and `iter_rows()`. Iteration copies only the rows consumed and yields independently mutable dictionaries. The complete Engine response is already in memory; this is not streaming computation. CSV export reads stored rows directly without creating a second matrix. Both Route and Reach support `to_geojson()`. `value` exposes the family-specific answer; `to_dict()` returns the complete Engine payload.
 
-See [Results](results.md) for fields, export formats, row outcomes, and comparison limits. `vigo.compare(before, after)` and `before.compare(after)` return a comparison Result without rerunning the Queries. The caller must align the study inputs; comparison does not validate all Query assumptions.
+See [Results](results.md) for fields, export formats, row outcomes, and comparison limits. `vigo.compare(before, after)` and `before.compare(after)` return a comparison Result without rerunning the Queries. Matrix comparisons require `originId` and `destinationId` on every row and match those IDs rather than row positions. The caller must align the study inputs; comparison does not validate all Query assumptions.
 
 `Result.status` is only `ready` or `blocked`. A blocked Result is a valid computation with no usable journey or surface. Cancellation and execution failures belong to `Job.status` or exceptions, not Result status.
 

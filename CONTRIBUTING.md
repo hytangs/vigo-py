@@ -23,6 +23,8 @@ python -m pip wheel . --no-deps --wheel-dir dist
 python scripts/check-wheel.py dist
 ```
 
+Run the tests both without optional dependencies and with `python -m pip install ".[speed]"`. Run `python scripts/benchmark-wrapper.py` to measure copy and decoding overhead; keep these measurements separate from complete query latency.
+
 Add focused tests for public behavior. Use a real VIGO City for end-to-end checks when the change crosses the Python and engine boundary.
 
 The normal tests use controlled process fixtures and check wrapper behavior. Notebook checks compile cells and require empty outputs; they do not execute routing. Public-source checks detect private paths, credentials, and generated artifacts. A wheel without `VIGO_BUNDLE_RUNTIME` is a lightweight development wheel and still requires an external Engine.

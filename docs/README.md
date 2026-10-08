@@ -23,7 +23,7 @@ Use Python to build a City from GTFS and OSM, ask transport questions, and retai
 | Matrix | How long does each origin–destination pair take? | A row per pair, optionally with transit journeys |
 | Reach | Where can I get within these time limits? | Travel-time surface and contours |
 
-Walk, Drive, and Transit are Route and Matrix modes. Reach uses scheduled transit with walking. Compare acts on completed Results; it does not run another routing query.
+Walk, Drive, and Transit are Route and Matrix modes. Reach supports scheduled transit with walking and walking-only queries. Compare acts on completed Results; it does not run another routing query.
 
 Use a Scenario for a supported change to one City revision. Planned transit changes support Reach. Supplied traffic supports Drive Route and Matrix when the runtime advertises it. Live transit is not exposed by the Python API. The [support table](reference.md#scenario) makes these boundaries explicit.
 

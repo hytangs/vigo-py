@@ -203,13 +203,6 @@ def _run(
         ) from error
 
 
-def _compatible_api(value: object) -> bool:
-    try:
-        return int(str(value).split(".", 1)[0]) == int(API_VERSION.split(".", 1)[0])
-    except (TypeError, ValueError):
-        return False
-
-
 def _command_identity(command: tuple[str, ...]) -> tuple[tuple[object, ...], ...]:
     identities = []
     executable = shutil.which(command[0]) or command[0]
@@ -247,7 +240,8 @@ def _runtime_capabilities(
         capabilities = None
     if (
         not isinstance(capabilities, dict)
-        or not _compatible_api(capabilities.get("apiVersion"))
+        or capabilities.get("schemaVersion") != "vigo.capabilities.v3"
+        or capabilities.get("apiVersion") != API_VERSION
         or not re.match(r"^0\.5\.\d+(?:$|[-+])", str(capabilities.get("productVersion", "")))
         or capabilities.get("cityFormatVersion") != CITY_FORMAT_VERSION
         or capabilities.get("resultSchemaVersion") != RESULT_SCHEMA_VERSION
@@ -257,6 +251,13 @@ def _runtime_capabilities(
         )
     ):
         raise VigoError("VIGO Python 0.5 requires a VIGO 0.5 runtime and the current stream API")
+    output = capabilities.get("output")
+    if (
+        not isinstance(output, dict)
+        or not isinstance(output.get("diagnostics"), list)
+        or "trace" not in output["diagnostics"]
+    ):
+        raise VigoError("VIGO 0.5 must advertise trace output for detailed Python Results")
     return capabilities
 
 
@@ -281,7 +282,7 @@ def resolve_runtime(
             failures.append(" ".join(command))
             continue
         return RuntimeInfo(
-            product_version=str(capabilities.get("productVersion", "unknown")),
+            product_version=capabilities["productVersion"],
             api_version=str(capabilities["apiVersion"]),
             source=source,
             path=command[-1],

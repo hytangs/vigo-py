@@ -9,7 +9,6 @@ import os
 import queue
 import re
 import subprocess
-import tempfile
 import threading
 import time
 import weakref
@@ -22,6 +21,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, TypeGuard, TypeVar, overload
 
+from ._json import copy_json, loads
 from .runtime import (
     API_VERSION,
     CITY_FORMAT_VERSION,
@@ -137,6 +137,9 @@ class Reach:
     walk_speed_kph: float = 4.8
     extent_radius_km: float = 8
     raster_size: int = 96
+    mode: str = "transit"
+    surface_sampling: str = "street"
+    include_street_edges: bool = False
 
 
 Query = Route | Matrix | Reach
@@ -206,6 +209,8 @@ def _point_payload(value: Point) -> Any:
             raise InvalidQuery("stop ids cannot be empty")
         return value.strip()
     if isinstance(value, Mapping):
+        if not {"stop", "stopId", "coordinate"}.intersection(value):
+            raise InvalidQuery("point mappings require stop, stopId, or coordinate")
         return copy.deepcopy(dict(value))
     if (
         isinstance(value, Sequence)
@@ -220,16 +225,10 @@ def _point_payload(value: Point) -> Any:
 
 
 def _point_rows(values: PointSet, label: str) -> list[dict[str, Any]]:
-    point_keys = {"stopId", "stop_id", "coordinate"}
-    coordinate_keys = (
-        "lat" in values and ("lon" in values or "lng" in values)
-        if isinstance(values, Mapping)
-        else False
-    )
+    point_keys = {"stop", "stopId", "coordinate"}
     if (
         isinstance(values, Mapping)
         and not (point_keys & values.keys())
-        and not coordinate_keys
     ):
         rows = [(str(key), point) for key, point in values.items()]
     elif isinstance(values, (str, Mapping)):
@@ -248,37 +247,7 @@ def _point_rows(values: PointSet, label: str) -> list[dict[str, Any]]:
     return [{"id": row_id, "point": _point_payload(point)} for row_id, point in rows]
 
 
-def _json_command(
-    runtime: RuntimeInfo,
-    city: Path,
-    name: str,
-    request: Mapping[str, Any],
-    arguments: Sequence[str],
-    timeout: float,
-) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix=f"vigo-{name}-") as temporary:
-        request_path = Path(temporary) / "request.json"
-        # Detailed Python Results use the current API's explicit trace channel.
-        output_request = {**request, "diagnostics": "trace"}
-        request_path.write_text(json.dumps(output_request, allow_nan=False), encoding="utf-8")
-        output = run_json(
-            runtime,
-            [name, f"--city={city}", f"--request={request_path}", *arguments],
-            timeout=timeout,
-        )
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise VigoError(f"VIGO {name} returned invalid JSON") from error
-    if not isinstance(payload, dict):
-        raise VigoError(f"VIGO {name} returned an invalid Result")
-    trace = payload.get("trace")
-    if not isinstance(trace, dict):
-        raise VigoError("VIGO returned no detailed Result")
-    return trace
-
-
-class _RouteStream:
+class _QueryStream:
     def __init__(self, city: City, service_date: str, timeout: float) -> None:
         self._timeout = timeout
         self._lock = threading.Lock()
@@ -304,10 +273,10 @@ class _RouteStream:
             env=_command_environment(city.runtime.command),
         )
         self._reader = threading.Thread(
-            target=self._read, name="vigo-route-reader", daemon=True
+            target=self._read, name="vigo-query-reader", daemon=True
         )
         self._error_reader = threading.Thread(
-            target=self._read_errors, name="vigo-route-errors", daemon=True
+            target=self._read_errors, name="vigo-query-errors", daemon=True
         )
         self._reader.start()
         self._error_reader.start()
@@ -323,25 +292,25 @@ class _RouteStream:
         try:
             for line in self._process.stdout:
                 try:
-                    value = json.loads(line)
+                    value = loads(line)
                     if not isinstance(value, dict):
-                        raise TypeError("route stream returned a non-object")
+                        raise TypeError("query stream returned a non-object")
                     self._responses.put(value)
                 except (json.JSONDecodeError, TypeError) as error:
                     self._responses.put(error)
                     return
         finally:
             detail = "\n".join(self._errors)
-            self._responses.put(VigoError(detail or "VIGO route process stopped"))
+            self._responses.put(VigoError(detail or "VIGO query process stopped"))
 
     @property
     def alive(self) -> bool:
         return not self._closed and self._process.poll() is None
 
-    def route(self, request: Mapping[str, Any]) -> dict[str, Any]:
+    def query(self, request: Mapping[str, Any]) -> dict[str, Any]:
         with self._lock:
             if not self.alive:
-                raise VigoError("VIGO route process is not running")
+                raise VigoError("VIGO query process is not running")
             self._sequence += 1
             request_id = f"python_{self._sequence}"
             message = {**request, "id": request_id}
@@ -353,24 +322,24 @@ class _RouteStream:
             except OSError as error:
                 self._stop()
                 raise VigoError(
-                    "VIGO route process stopped while receiving a Query"
+                    "VIGO query process stopped while receiving a Query"
                 ) from error
             try:
                 response = self._responses.get(timeout=self._timeout)
             except queue.Empty as error:
                 self._stop()
                 raise VigoTimeoutError(
-                    f"VIGO Route exceeded {self._timeout:g} seconds"
+                    f"VIGO Query exceeded {self._timeout:g} seconds"
                 ) from error
             if isinstance(response, BaseException):
                 self._stop()
                 raise response
             if response.get("id") != request_id:
                 self._stop()
-                raise VigoError("VIGO returned a Route for the wrong request")
+                raise VigoError("VIGO returned a response for the wrong request")
             if response.get("status") == "error":
                 raise VigoError(
-                    str(response.get("error", {}).get("message", "Route failed"))
+                    str(response.get("error", {}).get("message", "Query failed"))
                 )
             trace = response.get("trace")
             if not isinstance(trace, dict):
@@ -406,7 +375,7 @@ class _RouteStream:
                 pipe.close()
 
 
-def _close_route_streams(streams: dict[str, _RouteStream]) -> None:
+def _close_query_streams(streams: dict[str, _QueryStream]) -> None:
     active = list(streams.values())
     streams.clear()
     for stream in active:
@@ -433,29 +402,38 @@ class Result:
     @property
     def warnings(self) -> tuple[Any, ...]:
         value = self._payload.get("warnings", ())
-        return tuple(copy.deepcopy(value)) if isinstance(value, Sequence) else ()
+        return tuple(copy_json(item) for item in value) if isinstance(value, Sequence) else ()
 
     @property
     def timing(self) -> dict[str, Any]:
-        return copy.deepcopy(dict(self._payload.get("timing") or {}))
+        return copy_json(dict(self._payload.get("timing") or {}))
 
     @property
     def query(self) -> dict[str, Any]:
-        return copy.deepcopy(dict(self._payload.get("query") or {}))
+        return copy_json(dict(self._payload.get("query") or {}))
 
     @property
     def value(self) -> Any:
         if self.kind == "route":
-            return copy.deepcopy(self._payload.get("result"))
+            return copy_json(self._payload.get("result"))
         if self.kind == "matrix":
-            return copy.deepcopy(self._payload.get("rows", []))
+            return copy_json(self._payload.get("rows", []))
         if self.kind == "reach":
-            return copy.deepcopy(self._payload.get("surface"))
-        return copy.deepcopy(self._payload.get("change"))
+            return copy_json(self._payload.get("surface"))
+        return copy_json(self._payload.get("change"))
 
     @property
     def rows(self) -> tuple[dict[str, Any], ...]:
-        return tuple(copy.deepcopy(row) for row in self._payload.get("rows", ()))
+        return tuple(self.iter_rows())
+
+    def iter_rows(self) -> Iterator[dict[str, Any]]:
+        """Yield independent rows, copying only the rows the caller consumes.
+
+        The complete Engine response is already resident in this Result.
+        Iteration avoids allocating a second complete collection of rows.
+        """
+        for row in self._payload.get("rows", ()):
+            yield copy_json(row)
 
     @property
     def duration_minutes(self) -> float | None:
@@ -467,7 +445,7 @@ class Result:
     def legs(self) -> tuple[dict[str, Any], ...]:
         route = self._payload.get("result") if self.kind == "route" else None
         return (
-            tuple(copy.deepcopy(leg) for leg in route.get("legs", ()))
+            tuple(copy_json(leg) for leg in route.get("legs", ()))
             if isinstance(route, Mapping)
             else ()
         )
@@ -484,7 +462,7 @@ class Result:
         }
 
     def to_dict(self) -> dict[str, Any]:
-        return copy.deepcopy(dict(self._payload))
+        return copy_json(dict(self._payload))
 
     def to_json(self, *, indent: int | None = 2) -> str:
         return json.dumps(dict(self._payload), indent=indent, allow_nan=False,
@@ -492,7 +470,7 @@ class Result:
 
     def to_geojson(self) -> dict[str, Any]:
         if self.kind == "reach":
-            return copy.deepcopy(
+            return copy_json(
                 self._payload.get("contours")
                 or {"type": "FeatureCollection", "features": []}
             )
@@ -508,7 +486,7 @@ class Result:
                             "properties": {"index": index, "type": leg.get("type")},
                             "geometry": {
                                 "type": "LineString",
-                                "coordinates": copy.deepcopy(coordinates),
+                                "coordinates": copy_json(coordinates),
                             },
                         }
                     )
@@ -525,7 +503,7 @@ class Result:
                 json.dumps(self.to_geojson(), indent=2, allow_nan=False) + "\n", encoding="utf-8"
             )
         elif destination.suffix.lower() == ".csv" and self.kind == "matrix":
-            rows = list(self.rows)
+            rows = self._payload.get("rows", ())
             fields = list(dict.fromkeys(key for row in rows for key in row))
             with destination.open("w", newline="", encoding="utf-8") as stream:
                 writer = csv.DictWriter(stream, fieldnames=fields)
@@ -577,12 +555,12 @@ class City:
         self.timeout = float(timeout)
         if not math.isfinite(self.timeout) or self.timeout <= 0:
             raise ValueError("timeout must be finite and positive")
-        self._streams: dict[str, _RouteStream] = {}
+        self._streams: dict[str, _QueryStream] = {}
         self._stream_users: set[str] = set()
         self._stream_limit = _job_worker_count()
         self._closing_streams = False
         self._lock = threading.Condition()
-        weakref.finalize(self, _close_route_streams, self._streams)
+        weakref.finalize(self, _close_query_streams, self._streams)
 
     @property
     def name(self) -> str:
@@ -648,6 +626,16 @@ class City:
     def _support(self, query: Query, scenario: Scenario | None) -> Support:
         if not isinstance(query, (Route, Matrix, Reach)):
             raise InvalidQuery("query must be Route, Matrix, or Reach")
+        if isinstance(query, Reach):
+            if query.mode not in {"transit", "walk"}:
+                raise InvalidQuery("Reach mode must be transit or walk")
+            if query.surface_sampling not in {"street", "cell-center"}:
+                raise InvalidQuery("surface_sampling must be street or cell-center")
+            if type(query.include_street_edges) is not bool:
+                raise InvalidQuery("include_street_edges must be boolean")
+            modes = self._query_capability("reach").get("modes", {}).get("available", ())
+            if query.mode == "walk" and "walk" not in modes:
+                return Support(False, "walk_reach", ("runtime with walking Reach support",))
         if isinstance(query, (Route, Matrix)):
             if type(query.disable_cache) is not bool:
                 raise InvalidQuery("disable_cache must be boolean")
@@ -705,6 +693,8 @@ class City:
         if sum((planned, live, traffic)) > 1:
             return Support(False, "scenario_state_combination")
         if planned:
+            if isinstance(query, Reach) and query.mode == "walk":
+                return Support(False, "planned_transit_walk_reach", ("transit Reach",))
             return (
                 Support(True)
                 if isinstance(query, Reach)
@@ -751,7 +741,7 @@ class City:
         )
 
     @contextmanager
-    def _stream(self, service_date: str) -> Iterator[_RouteStream]:
+    def _stream(self, service_date: str) -> Iterator[_QueryStream]:
         deadline = time.monotonic() + self.timeout
         with self._lock:
             while True:
@@ -772,7 +762,7 @@ class City:
                         if stream is None or not stream.alive:
                             if stream is not None:
                                 stream.close()
-                            stream = _RouteStream(self, service_date, self.timeout)
+                            stream = _QueryStream(self, service_date, self.timeout)
                         # Dictionary order records use; only idle dates may be evicted.
                         self._streams.pop(service_date, None)
                         self._streams[service_date] = stream
@@ -781,7 +771,7 @@ class City:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise VigoTimeoutError(
-                        "Timed out waiting for an available VIGO Route process"
+                        "Timed out waiting for an available VIGO Query process"
                     )
                 self._lock.wait(timeout=remaining)
         try:
@@ -832,7 +822,7 @@ class City:
             ),
         }
         with self._stream(service_date) as stream:
-            payload = stream.route({"kind": "route", **request})
+            payload = stream.query({"kind": "route", **request})
         payload.setdefault("timing", {})["endToEndMs"] = round(
             (time.perf_counter() - started) * 1000, 3
         )
@@ -875,7 +865,7 @@ class City:
             ),
         }
         with self._stream(service_date) as stream:
-            payload = stream.route(request)
+            payload = stream.query(request)
         payload.setdefault("timing", {})["endToEndMs"] = round(
             (time.perf_counter() - started) * 1000, 3
         )
@@ -890,6 +880,9 @@ class City:
         started = time.perf_counter()
         clock, service_date = _clock(query.depart_at, query.service_date)
         request = {
+            "mode": query.mode,
+            "surfaceSampling": query.surface_sampling,
+            "includeStreetEdges": query.include_street_edges,
             "time": clock,
             "maxWalkKm": query.max_walk_km,
             "origin": _point_payload(query.origin),
@@ -911,7 +904,7 @@ class City:
             ),
         }
         with self._stream(service_date) as stream:
-            payload = stream.route({"kind": "reach", **request})
+            payload = stream.query({"kind": "reach", **request})
         payload.setdefault("timing", {})["endToEndMs"] = round(
             (time.perf_counter() - started) * 1000, 3
         )
@@ -931,7 +924,7 @@ class City:
             try:
                 while self._stream_users:
                     self._lock.wait()
-                _close_route_streams(self._streams)
+                _close_query_streams(self._streams)
             finally:
                 self._closing_streams = False
                 self._lock.notify_all()
@@ -1156,15 +1149,11 @@ def compare(before: Result, after: Result) -> Result:
         }
     elif before.kind == "matrix":
 
-        def key(row: Mapping[str, Any]) -> tuple[Any, Any]:
-            return (
-                row.get("originId")
-                if row.get("originId") is not None
-                else row.get("originIndex"),
-                row.get("destinationId")
-                if row.get("destinationId") is not None
-                else row.get("destinationIndex"),
-            )
+        def key(row: Mapping[str, Any]) -> tuple[str, str]:
+            origin, destination = row.get("originId"), row.get("destinationId")
+            if not isinstance(origin, str) or not isinstance(destination, str):
+                raise TypeError("Matrix comparison requires originId and destinationId on every row")
+            return origin, destination
 
         left_rows = {key(row): row for row in before.rows}
         pairs = []

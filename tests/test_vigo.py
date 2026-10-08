@@ -30,13 +30,15 @@ if args == ["--help"]:
 if args == ["capabilities"]:
     print(json.dumps({
         "schemaVersion": "vigo.capabilities.v3",
+        "output": {"diagnostics": ["none", "summary", "profile", "trace"]},
         "productVersion": "0.5.0",
-        "apiVersion": "1.1",
+        "apiVersion": "1.0",
         "cityFormatVersion": 1,
         "city": {"privateAccess": ["public", "endpoints"]},
         "resultSchemaVersion": 1,
         "publicCliCommands": ["build", "capabilities", "inspect", "route", "matrix", "reach", "stream", "compare"],
         "queries": [
+            {"id": "reach", "resident": True, "modes": {"available": ["transit", "walk"]}},
             {"id": "route", "resident": True, "transitStreetCacheControl": True, "maxTransfers": {"min": 0, "max": 31, "default": None}},
             {"id": "matrix", "resident": True, "journeys": True,
              "transitStreetCacheControl": True,
@@ -73,7 +75,7 @@ elif command == "stream":
         kind = request["kind"]
         response = {
             "schemaVersion": f"vigo.result.{kind}.v1", "productVersion": "0.5.0",
-            "apiVersion": "1.1", "resultSchemaVersion": 1, "id": request["id"],
+            "apiVersion": "1.0", "resultSchemaVersion": 1, "id": request["id"],
             "kind": kind, "status": "ready", "query": {**request, "serviceDate": options["service-date"]}, "warnings": [],
             "timing": {"computeMs": 1.0},
         }
@@ -138,6 +140,28 @@ class VigoPythonTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_reach_options_and_structured_matrix_stops(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city:
+            result = city.reach("A", service_date="2026-07-15", mode="walk",
+                                surface_sampling="cell-center", include_street_edges=True)
+            self.assertEqual(result.query["mode"], "walk")
+            self.assertEqual(result.query["surfaceSampling"], "cell-center")
+            self.assertTrue(result.query["includeStreetEdges"])
+            matrix = city.matrix({"stop": {"id": "A", "feed": "feed"}},
+                                 {"stop": {"id": "B"}}, service_date="2026-07-15")
+            self.assertEqual(len(matrix.rows), 1)
+            self.assertEqual(matrix.query["origins"], [
+                {"id": "origin", "point": {"stop": {"id": "A", "feed": "feed"}}}
+            ])
+            for options in ({"mode": "drive"}, {"surface_sampling": "coordinate"},
+                            {"include_street_edges": "true"}):
+                with self.assertRaises(vigo.InvalidQuery):
+                    city.reach("A", service_date="2026-07-15", **options)
+            with patch.dict(city.runtime.capabilities, {"queries": []}):
+                self.assertFalse(city.supports(vigo.Reach("A", mode="walk")).supported)
+            self.assertFalse(city.scenario("planned", without_routes=["R1"]).supports(
+                vigo.Reach("A", mode="walk")).supported)
 
     def test_configured_runtime_fails_closed(self) -> None:
         with patch.dict("os.environ", {"VIGO_RUNTIME": str(self.root / "missing")}), self.assertRaises(vigo.VigoError):
@@ -217,6 +241,45 @@ class VigoPythonTest(unittest.TestCase):
         self.cli.write_text(self.cli.read_text().replace('"0.5.0"', '"0.4.4"'))
         with self.assertRaisesRegex(vigo.VigoError, "VIGO 0.5 runtime"):
             vigo.resolve_runtime(self.command)
+
+    def test_runtime_requires_current_api_schema_and_trace_output(self) -> None:
+        source = self.cli.read_text()
+        for old, new in (
+            ('"apiVersion": "1.0"', '"apiVersion": "1.1"'),
+            ('"vigo.capabilities.v3"', '"vigo.capabilities.v2"'),
+            ('"summary", "profile", "trace"', '"summary", "profile"'),
+        ):
+            with self.subTest(replacement=new):
+                self.cli.write_text(source.replace(old, new))
+                with self.assertRaises(vigo.VigoError):
+                    vigo.resolve_runtime(self.command)
+
+    def test_point_mappings_require_current_engine_fields(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city:
+            for point in ({"stop_id": "A"}, {"lat": 38.9, "lon": -77.05}, {"lat": 38.9, "lng": -77.05}):
+                with self.subTest(point=point), self.assertRaises(vigo.InvalidQuery):
+                    city.route(point, "B", depart_at="08:00", service_date="2026-07-15")
+            self.assertFalse(city._streams)
+
+    def test_matrix_comparison_matches_ids_and_rejects_index_only_rows(self) -> None:
+        def matrix(rows):
+            return vigo.Result("matrix", {"resultSchemaVersion": 1, "status": "ready", "rows": rows}, "fixture")
+
+        before = matrix([
+            {"originId": "a", "destinationId": "hub", "durationMinutes": 10},
+            {"originId": "b", "destinationId": "hub", "durationMinutes": 20},
+        ])
+        after = matrix([
+            {"originId": "b", "destinationId": "hub", "durationMinutes": 19},
+            {"originId": "a", "destinationId": "hub", "durationMinutes": 9},
+        ])
+        change = vigo.compare(before, after).value
+        self.assertEqual(change["comparablePairs"], 2)
+        self.assertEqual(change["meanChangeMinutes"], -1)
+        obsolete = matrix([{"originIndex": 0, "destinationIndex": 0, "durationMinutes": 10}])
+        for left, right in ((obsolete, before), (before, obsolete)):
+            with self.assertRaisesRegex(TypeError, "originId and destinationId"):
+                vigo.compare(left, right)
 
     def test_failed_runtime_handshake_is_not_cached(self) -> None:
         from vigo.runtime import _run
@@ -367,7 +430,7 @@ class VigoPythonTest(unittest.TestCase):
         with vigo.build(output, gtfs=gtfs, osm=osm, runtime=self.command) as city:
             self.assertEqual(city.revision_id, "20260904T120000-001Z")
             self.assertEqual(city.runtime.product_version, "0.5.0")
-            self.assertEqual(city.runtime.api_version, "1.1")
+            self.assertEqual(city.runtime.api_version, "1.0")
             self.assertTrue((output / "routing" / "project.sqlite").is_file())
             self.assertTrue((output / "osm" / "street-index.sqlite").is_file())
 
@@ -424,7 +487,7 @@ class VigoPythonTest(unittest.TestCase):
                         city.run(query)
             self.assertFalse(city.supports(vigo.Route("A", "B", waypoints=["C"], max_transfers=1)).supported)
 
-    def test_older_runtime_rejects_unsupported_queries(self) -> None:
+    def test_missing_capabilities_reject_unsupported_queries(self) -> None:
         with (
             vigo.open(self.city_path, runtime=self.command) as city,
             patch.dict(city.runtime.capabilities, {"queries": []}),
@@ -524,7 +587,7 @@ class VigoPythonTest(unittest.TestCase):
                     city.route, "A", "B", depart_at="08:00", service_date="2026-09-05"
                 )
                 with self.assertRaisesRegex(
-                    vigo.VigoTimeoutError, "available VIGO Route process"
+                    vigo.VigoTimeoutError, "available VIGO Query process"
                 ):
                     future.result(timeout=5)
                 self.assertTrue(active.alive)

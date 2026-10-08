@@ -7,11 +7,26 @@ import datetime as dt
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import vigo
+
+
+def _one_shot(runtime, city, kind, request, arguments, timeout):
+    """Independent CLI reference; production queries use only resident streams."""
+    from vigo.runtime import _command_environment
+
+    response = subprocess.run(
+        [*runtime.command, kind, f"--city={city}", "--request=-", "--diagnostics=trace", *arguments],
+        input=json.dumps(request, allow_nan=False), text=True, encoding="utf-8",
+        capture_output=True, check=True, timeout=timeout,
+        env=_command_environment(runtime.command),
+    )
+    return json.loads(response.stdout)["trace"]
 
 
 @unittest.skipUnless(
@@ -67,8 +82,39 @@ class LiveRuntimeTest(unittest.TestCase):
                     self.assertGreaterEqual(route.timing[field], 0)
                 self.assertEqual(route.query["serviceDate"], "2026-07-15")
 
+    def test_walking_reach_and_public_stop_references(self) -> None:
+        options = {"service_date": "2026-07-15", "depart_at": "07:55", "max_walk_km": 0.2}
+        matrix = self.city.matrix({"stop": {"id": "A"}}, {"stop": {"id": "B"}}, **options)
+        reference = self.city.matrix("A", "B", **options)
+        self.assertEqual(matrix.rows, reference.rows)
+        for sampling in ("street", "cell-center"):
+            result = self.city.reach("A", mode="walk", surface_sampling=sampling,
+                                    include_street_edges=True, raster_size=48, extent_radius_km=2, **options)
+            self.assertEqual(result.status, "ready")
+            self.assertEqual(result.query["mode"], "walk")
+            self.assertEqual(result.query["surfaceSampling"], sampling)
+            self.assertTrue(result.query["includeStreetEdges"])
+            self.assertEqual(len(result.value["values"]), 48 * 48)
+
+    def test_decoder_preserves_complete_live_responses(self) -> None:
+        from vigo._json import loads
+
+        decoded = []
+
+        def checked_loads(line):
+            value = loads(line)
+            decoded.append(value == json.loads(line))
+            return value
+
+        options = {"service_date": "2026-07-15", "depart_at": "07:55", "max_walk_km": 0.2}
+        with patch("vigo.model.loads", checked_loads):
+            self.city.route("A", "B", **options)
+            self.city.matrix(["A"] * 1024, ["B"], **options)
+            self.city.reach("A", extent_radius_km=2, **options)
+        self.assertEqual(len(decoded), 3)
+        self.assertTrue(all(decoded), "selected decoder changed a live Engine response")
+
     def test_resident_queries_match_one_shot_and_reuse_process(self) -> None:
-        from vigo.model import _json_command
         options = {"depart_at": "07:55", "service_date": "2026-07-15", "max_walk_km": 0.2}
         stream = None
         for mode, waypoints in (("transit", []), ("walk", []), ("drive", []), ("walk", ["X"])):
@@ -78,7 +124,7 @@ class LiveRuntimeTest(unittest.TestCase):
                 if stream is not None:
                     self.assertIs(current, stream)
                 stream = current
-                one_shot = _json_command(self.city.runtime, self.city.path, "route", {
+                one_shot = _one_shot(self.city.runtime, self.city.path, "route", {
                     "origin": "A", "destination": "B", "mode": mode, "waypoints": waypoints,
                     "requireTransitRide": False,
                 }, ["--service-date=2026-07-15", "--time=07:55", "--max-walk=0.2"], 30)
@@ -88,7 +134,7 @@ class LiveRuntimeTest(unittest.TestCase):
                 repeated = self.city.route("A", "B", mode=mode, waypoints=waypoints, **options)
                 self.assertEqual(repeated.timing["openMs"], 0)
         resident = self.city.reach("A", raster_size=48, extent_radius_km=2, **options)
-        one_shot = _json_command(self.city.runtime, self.city.path, "reach", {
+        one_shot = _one_shot(self.city.runtime, self.city.path, "reach", {
             "origin": "A", "rasterSize": 48, "extentRadiusKm": 2,
         }, ["--service-date=2026-07-15", "--time=07:55", "--max-walk=0.2"], 30)
         for field in ("values", "width", "height", "bounds", "schemaVersion"):
