@@ -255,11 +255,16 @@ class _QueryStream:
         self._closed = False
         self._responses: queue.Queue[dict[str, Any] | BaseException] = queue.Queue()
         self._errors: deque[str] = deque(maxlen=40)
+        output_options = (
+            ["--stream-output=detailed"]
+            if "detailed" in city.runtime.capabilities.get("output", {}).get("streamFormats", [])
+            else ["--diagnostics=trace"]
+        )
         self._process = subprocess.Popen(
             [
                 *city.runtime.command,
                 "stream",
-                "--diagnostics=trace",
+                *output_options,
                 f"--city={city.path}",
                 f"--service-date={service_date}",
                 f"--service-day={_service_day(service_date)}",
@@ -1060,6 +1065,7 @@ def build(
     gtfs: str | os.PathLike[str] | Sequence[str | os.PathLike[str]],
     osm: str | os.PathLike[str],
     private_access: str = "public",
+    street_modes: str = "walk,drive",
     replace: bool = False,
     runtime: RuntimeInfo | str | os.PathLike[str] | Sequence[str] | None = None,
     timeout: float = 1_800.0,
@@ -1074,12 +1080,15 @@ def build(
     runtime_info = resolve_runtime(runtime)
     if private_access not in {"public", "endpoints"}:
         raise ValueError("private_access must be public or endpoints")
+    if street_modes not in {"walk", "walk,drive"}:
+        raise ValueError("street_modes must be walk or walk,drive")
     if private_access == "endpoints" and "endpoints" not in runtime_info.capabilities.get("city", {}).get("privateAccess", ()):
         raise VigoError("This runtime does not support authorized private endpoint access.")
     arguments = [
         "build",
         *(f"--gtfs={Path(source).expanduser().resolve()}" for source in sources),
         f"--osm={Path(osm).expanduser().resolve()}",
+        f"--street-modes={street_modes}",
         *(["--private-access=endpoints"] if private_access == "endpoints" else []),
         f"--output={output_path}",
         *(["--replace"] if replace else []),

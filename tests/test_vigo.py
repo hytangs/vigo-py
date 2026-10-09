@@ -61,6 +61,7 @@ if command == "build":
         "cityFormatVersion": 1,
         "name": "built-city",
         "privateAccess": options.get("private-access", "public"),
+        "streetModes": options.get("street-modes", "walk,drive"),
         "revisionId": "20260904T120000-001Z",
         "builtAt": "2026-09-04T12:00:00.000Z",
         "sources": {"gtfs": [{"name": "feed.zip"}], "osm": {"name": "region.osm.pbf"}},
@@ -421,6 +422,19 @@ class VigoPythonTest(unittest.TestCase):
         self.assertEqual(difference.kind, "comparison")
         self.assertEqual(difference.value["durationChangeMinutes"], 0)
 
+    def test_detailed_stream_is_negotiated_without_changing_result_fields(self) -> None:
+        program = self.root / "detailed_runtime.py"
+        program.write_text(FAKE_VIGO.replace(
+            '"output": {"diagnostics":',
+            '"output": {"streamFormats": ["public", "detailed"], "diagnostics":',
+        ).replace('options.get("diagnostics") != "trace"',
+                  'options.get("stream-output") != "detailed"'), encoding="utf-8")
+        with vigo.open(self.city_path, runtime=(sys.executable, str(program))) as city:
+            result = city.route("JSON", "B", depart_at="08:00", service_date="2026-09-04")
+            self.assertEqual(result.value["title"], 'Station — 北 "A"')
+            self.assertEqual(len(result.legs), 1)
+            self.assertEqual(result.value["durationMinutes"], 12.5)
+
     def test_build_publishes_one_city_directory(self) -> None:
         gtfs = self.root / "feed.zip"
         osm = self.root / "region.osm.pbf"
@@ -433,6 +447,13 @@ class VigoPythonTest(unittest.TestCase):
             self.assertEqual(city.runtime.api_version, "1.0")
             self.assertTrue((output / "routing" / "project.sqlite").is_file())
             self.assertTrue((output / "osm" / "street-index.sqlite").is_file())
+
+        self.assertEqual(json.loads((output / "network.json").read_text())["streetModes"], "walk,drive")
+        walking = self.root / "walking-city"
+        with vigo.build(walking, gtfs=gtfs, osm=osm, street_modes="walk", runtime=self.command):
+            self.assertEqual(json.loads((walking / "network.json").read_text())["streetModes"], "walk")
+        with self.assertRaises(ValueError):
+            vigo.build(self.root / "invalid-city", gtfs=gtfs, osm=osm, street_modes="drive", runtime=self.command)
 
         authorized = self.root / "authorized-city"
         with vigo.build(authorized, gtfs=gtfs, osm=osm, private_access="endpoints", runtime=self.command):

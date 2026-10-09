@@ -45,7 +45,7 @@ with vigo.open("./boston") as city:
 
 ## Build a City
 
-`vigo.build(output, *, gtfs, osm, private_access="public", replace=False, runtime=None, timeout=1800.0, progress=False)` writes one complete City and returns it opened for queries. `gtfs` accepts one ZIP path or a sequence of paths; `osm` accepts one OSM PBF path.
+`vigo.build(output, *, gtfs, osm, private_access="public", street_modes="walk,drive", replace=False, runtime=None, timeout=1800.0, progress=False)` writes one complete City and returns it opened for queries. `gtfs` accepts one ZIP path or a sequence of paths; `osm` accepts one OSM PBF path.
 
 ```python
 with vigo.build(
@@ -56,6 +56,8 @@ with vigo.build(
     print(city.name, city.revision_id, city.built_at)
     print(city.sources)
 ```
+
+Use `street_modes="walk"` for a walking/transit-only City; the default `"walk,drive"` also prepares driving data.
 
 Pass `replace=True` only when you intend to replace an existing City.
 Pass `progress=True` to show Build stages and elapsed time with the optional
@@ -324,3 +326,5 @@ Python constructor misuse can also raise ordinary `TypeError` or `ValueError`; e
 A runtime argument can be a `RuntimeInfo`, a path to a supported runtime layout or executable, or a sequence of command arguments. See [Runtime and loading](runtime.md#select-a-runtime) for selection, compatibility, and platform requirements.
 
 [Documentation](README.md) · [Workflows](workflows.md) · [Troubleshooting](troubleshooting.md)
+
+The Python wrapper negotiates the resident CLI’s detailed stream format when advertised. It preserves the same complete `Result` while avoiding a second public projection. Earlier compatible 0.5 runtimes continue to use `--diagnostics=trace`.
