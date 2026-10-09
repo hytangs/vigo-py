@@ -6,12 +6,15 @@ import sys
 import tempfile
 import textwrap
 import threading
+import time
 import unittest
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
 import vigo
+from vigo import model
 
 FAKE_VIGO = r"""from __future__ import annotations
 import json
@@ -544,6 +547,107 @@ class VigoPythonTest(unittest.TestCase):
                 result.query["scenario"]["services"][0]["stops"][0]["coordinate"],
                 [0, 0],
             )
+
+    def test_job_admission_stays_bounded_across_queued_cancellation(self) -> None:
+        entered, release = threading.Event(), threading.Event()
+        with ThreadPoolExecutor(max_workers=1) as executor, patch.object(
+            model, "_EXECUTOR", executor
+        ), patch.object(model, "_JOB_SLOTS", threading.BoundedSemaphore(2)):
+            def blocking():
+                entered.set()
+                release.wait(timeout=5)
+                return 1
+            first = model._submit_job(blocking)
+            try:
+                self.assertTrue(entered.wait(timeout=2))
+                second = model._submit_job(lambda: self.fail("Canceled work ran"))
+                self.assertTrue(second.cancel())
+                for _ in range(20):
+                    with self.assertRaisesRegex(vigo.VigoError, "capacity"):
+                        model._submit_job(lambda: None)
+            finally:
+                release.set()
+            self.assertEqual(first.wait(timeout=2), 1)
+            executor.submit(lambda: None).result(timeout=2)
+            self.assertEqual(model._submit_job(lambda: 3).wait(timeout=2), 3)
+            executor.submit(lambda: None).result(timeout=2)
+
+    def test_job_failure_and_executor_rejection_release_capacity(self) -> None:
+        slots = threading.BoundedSemaphore(1)
+        with ThreadPoolExecutor(max_workers=1) as executor, patch.object(model, "_EXECUTOR", executor), patch.object(model, "_JOB_SLOTS", slots):
+            def fail():
+                raise ValueError("expected failure")
+            with self.assertRaisesRegex(ValueError, "expected failure"):
+                model._submit_job(fail).wait(timeout=2)
+            executor.submit(lambda: None).result(timeout=2)
+            self.assertEqual(model._submit_job(lambda: 7).wait(timeout=2), 7)
+            executor.submit(lambda: None).result(timeout=2)
+        with patch.object(model, "_EXECUTOR", executor), patch.object(model, "_JOB_SLOTS", slots):
+            with self.assertRaises(RuntimeError):
+                model._submit_job(lambda: None)
+            self.assertTrue(slots.acquire(blocking=False))
+            slots.release()
+
+    def test_oversized_request_does_not_poison_stream(self) -> None:
+        with vigo.open(self.city_path, runtime=self.command) as city, city._stream("2026-09-04") as stream:
+            with patch.object(model, "_MAX_REQUEST_BYTES", 1024), self.assertRaisesRegex(vigo.VigoError, "request exceeds"):
+                stream.query({"kind": "route", "padding": "x" * 2048})
+            # The same process is reusable after a rejected request.
+            process = stream._process
+            result = stream.query({"kind": "route", "origin": "A", "destination": "B"})
+            self.assertEqual(result["status"], "ready")
+            self.assertIs(stream._process, process)
+
+    def test_pipe_backpressure_is_timed_out_and_all_threads_exit(self) -> None:
+        self.cli.write_text(FAKE_VIGO.replace(
+            'elif command == "stream":',
+            'elif command == "stream":\n    import time\n    time.sleep(30)',
+        ), encoding="utf-8")
+        with vigo.open(self.city_path, runtime=self.command, timeout=0.1) as city, city._stream("2026-09-04") as stream:
+            watchdog = threading.Timer(3, stream._process.kill)
+            watchdog.start()
+            started = time.monotonic()
+            try:
+                with self.assertRaises(vigo.VigoTimeoutError):
+                    stream.query({"kind": "route", "padding": "x" * (2 * 1024 * 1024)})
+            finally:
+                watchdog.cancel()
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertIsNotNone(stream._process.poll())
+            for thread in (stream._writer, stream._reader, stream._error_reader):
+                self.assertFalse(thread.is_alive())
+            self.assertTrue(stream._responses.empty())
+            self.assertTrue(stream._writes.empty())
+
+    def test_oversized_response_stops_worker_and_releases_buffers(self) -> None:
+        self.cli.write_text(FAKE_VIGO.replace(
+            'elif command == "stream":',
+            'elif command == "stream":\n    print("x" * 8192, flush=True)',
+        ), encoding="utf-8")
+        with vigo.open(self.city_path, runtime=self.command) as city, patch.object(
+            model, "_MAX_RESPONSE_BYTES", 4096
+        ), city._stream("2026-09-04") as stream:
+            with self.assertRaisesRegex(vigo.VigoError, "response exceeds"):
+                stream.query({"kind": "route"})
+            self.assertIsNotNone(stream._process.poll())
+            self.assertFalse(stream._reader.is_alive())
+            self.assertTrue(stream._responses.empty())
+
+    def test_idle_reader_does_not_retain_consumed_result(self) -> None:
+        references = []
+        class Response(dict):
+            pass
+        def decode(line):
+            response = Response(json.loads(line))
+            references.append(weakref.ref(response))
+            return response
+        with vigo.open(self.city_path, runtime=self.command) as city, patch.object(model, "loads", decode):
+            result = city.route("A", "B", depart_at="08:00", service_date="2026-09-04")
+            self.assertEqual(result.status, "ready")
+            deadline = time.monotonic() + 2
+            while references[0]() is not None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertIsNone(references[0](), "Idle reader retained the consumed response")
 
     def test_route_stream_recovers_and_closes_all_pipes(self) -> None:
         city = vigo.open(self.city_path, runtime=self.command)

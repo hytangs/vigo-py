@@ -328,3 +328,11 @@ A runtime argument can be a `RuntimeInfo`, a path to a supported runtime layout 
 [Documentation](README.md) · [Workflows](workflows.md) · [Troubleshooting](troubleshooting.md)
 
 The Python wrapper negotiates the resident CLI’s detailed stream format when advertised. It preserves the same complete `Result` while avoiding a second public projection. Earlier compatible 0.5 runtimes continue to use `--diagnostics=trace`.
+
+## Concurrent jobs and resource limits
+
+`City.submit` and `Scenario.submit` share a process-wide limit of 32 running or pending jobs. When capacity is full, submission raises `VigoError`; retry after work finishes. A canceled queued job keeps its capacity slot until the executor dequeues it, so repeated submit/cancel cannot accumulate an unbounded queue. Canceling a running job remains unsupported.
+
+A resident stream serializes requests for its service date. Different dates can use the bounded City process pool. The query timeout covers writing to the engine pipe and waiting for its response; a stalled pipe terminates the child and releases its buffers. Waiting for a free stream has its own timeout using the City's timeout value.
+
+The Python stream accepts requests up to 8 MiB of UTF-8 JSON and responses up to 64 MiB. Oversized requests raise `VigoError` before dispatch; oversized responses discard the worker. Split larger matrices or omit optional journey geometry. Response queues and stderr retention are bounded, and idle reader/writer threads release completed response/request buffers.

@@ -13,7 +13,7 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -68,6 +68,11 @@ def _job_worker_count() -> int:
 _EXECUTOR = ThreadPoolExecutor(
     max_workers=_job_worker_count(), thread_name_prefix="vigo"
 )
+
+_MAX_PENDING_JOBS = 32
+_JOB_SLOTS = threading.BoundedSemaphore(_MAX_PENDING_JOBS)
+_MAX_REQUEST_BYTES = 8 * 1024 * 1024
+_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
 class InvalidQuery(VigoError, ValueError):
@@ -253,7 +258,8 @@ class _QueryStream:
         self._lock = threading.Lock()
         self._sequence = 0
         self._closed = False
-        self._responses: queue.Queue[dict[str, Any] | BaseException] = queue.Queue()
+        self._responses: queue.Queue[dict[str, Any] | BaseException] = queue.Queue(maxsize=1)
+        self._writes: queue.Queue[bytes | None] = queue.Queue(maxsize=1)
         self._errors: deque[str] = deque(maxlen=40)
         output_options = (
             ["--stream-output=detailed"]
@@ -272,9 +278,6 @@ class _QueryStream:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            bufsize=1,
             env=_command_environment(city.runtime.command),
         )
         self._reader = threading.Thread(
@@ -283,30 +286,70 @@ class _QueryStream:
         self._error_reader = threading.Thread(
             target=self._read_errors, name="vigo-query-errors", daemon=True
         )
+        self._writer = threading.Thread(
+            target=self._write, name="vigo-query-writer", daemon=True
+        )
         self._reader.start()
         self._error_reader.start()
+        self._writer.start()
+
+    def _publish(self, value: dict[str, Any] | BaseException) -> bool:
+        while not self._closed:
+            try:
+                self._responses.put(value, timeout=0.05)
+                return True
+            except queue.Full:
+                pass
+        return False
+
+    def _write(self) -> None:
+        assert self._process.stdin is not None
+        while not self._closed:
+            message = self._writes.get()
+            if message is None or self._closed:
+                return
+            try:
+                self._process.stdin.write(message)
+                self._process.stdin.flush()
+            except OSError:
+                self._publish(VigoError("VIGO query process stopped while receiving a Query"))
+                return
+            finally:
+                # An idle writer must not retain the previous large request.
+                del message
 
     def _read_errors(self) -> None:
         assert self._process.stderr is not None
-        for line in self._process.stderr:
-            if text := line.strip():
+        while line := self._process.stderr.readline(4096):
+            if text := line.decode("utf-8", errors="replace").strip():
                 self._errors.append(text)
 
     def _read(self) -> None:
         assert self._process.stdout is not None
         try:
-            for line in self._process.stdout:
+            while encoded := self._process.stdout.readline(_MAX_RESPONSE_BYTES + 1):
+                if len(encoded) > _MAX_RESPONSE_BYTES:
+                    self._publish(VigoError("VIGO response exceeds 64 MiB"))
+                    return
                 try:
+                    # Drop wire bytes before JSON decoding; otherwise the
+                    # stdlib decoder temporarily retains three full copies.
+                    line = encoded.decode("utf-8")
+                    del encoded
                     value = loads(line)
                     if not isinstance(value, dict):
                         raise TypeError("query stream returned a non-object")
-                    self._responses.put(value)
-                except (json.JSONDecodeError, TypeError) as error:
-                    self._responses.put(error)
+                    if not self._publish(value):
+                        return
+                    # Do not keep a decoded Result alive in the idle reader.
+                    del value
+                    del line
+                except (ValueError, TypeError) as error:
+                    self._publish(error)
                     return
         finally:
             detail = "\n".join(self._errors)
-            self._responses.put(VigoError(detail or "VIGO query process stopped"))
+            self._publish(VigoError(detail or "VIGO query process stopped"))
 
     @property
     def alive(self) -> bool:
@@ -320,17 +363,17 @@ class _QueryStream:
             request_id = f"python_{self._sequence}"
             message = {**request, "id": request_id}
             assert self._process.stdin is not None
-            encoded = json.dumps(message, allow_nan=False, separators=(",", ":")) + "\n"
+            encoded = (json.dumps(message, allow_nan=False, separators=(",", ":")) + "\n").encode("utf-8")
+            if len(encoded) > _MAX_REQUEST_BYTES:
+                raise VigoError("VIGO request exceeds 8 MiB")
+            # The timeout covers both pipe backpressure and computation.
             try:
-                self._process.stdin.write(encoded)
-                self._process.stdin.flush()
-            except OSError as error:
-                self._stop()
-                raise VigoError(
-                    "VIGO query process stopped while receiving a Query"
-                ) from error
-            try:
+                self._writes.put_nowait(encoded)
+                del encoded
                 response = self._responses.get(timeout=self._timeout)
+            except queue.Full as error:
+                self._stop()
+                raise VigoError("VIGO query writer is unavailable") from error
             except queue.Empty as error:
                 self._stop()
                 raise VigoTimeoutError(
@@ -359,25 +402,36 @@ class _QueryStream:
         if self._closed:
             return
         self._closed = True
-        if self._process.stdin:
-            try:
-                self._process.stdin.close()
-            except OSError:
-                pass
+        # Terminate before closing buffered stdin: close() can flush into a
+        # full pipe and deadlock if the child is not reading.
+        if self._process.poll() is None:
+            self._process.terminate()
         try:
             self._process.wait(timeout=1)
         except subprocess.TimeoutExpired:
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self._process.wait()
+            self._process.kill()
+            self._process.wait()
+        try:
+            self._writes.put_nowait(None)
+        except queue.Full:
+            pass
+        self._writer.join(timeout=1)
         self._reader.join(timeout=1)
         self._error_reader.join(timeout=1)
-        for pipe in (self._process.stdout, self._process.stderr):
+        for pipe in (self._process.stdin, self._process.stdout, self._process.stderr):
             if pipe is not None:
-                pipe.close()
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+        # Closed streams may remain in the City's date pool until reused.
+        for pending in (self._writes, self._responses):
+            while True:
+                try:
+                    pending.get_nowait()
+                except queue.Empty:
+                    break
+
 
 
 def _close_query_streams(streams: dict[str, _QueryStream]) -> None:
@@ -541,6 +595,31 @@ class Job:
 
     def cancel(self) -> bool:
         return self._future.cancel()
+
+
+def _submit_job(operation: Callable[[], Any]) -> Job:
+    if not _JOB_SLOTS.acquire(blocking=False):
+        raise VigoError("VIGO job capacity reached (32 pending/running jobs); retry after a job finishes")
+    future: Future[Any] = Future()
+
+    def run() -> None:
+        try:
+            if future.set_running_or_notify_cancel():
+                try:
+                    future.set_result(operation())
+                except BaseException as error:  # noqa: BLE001 - Future must carry worker failures, including SystemExit.
+                    future.set_exception(error)
+        finally:
+            # Cancellation keeps its slot until the executor dequeues it,
+            # preventing repeated submit/cancel from growing tombstones.
+            _JOB_SLOTS.release()
+
+    try:
+        _EXECUTOR.submit(run)
+    except BaseException:
+        _JOB_SLOTS.release()
+        raise
+    return Job(future)
 
 
 class City:
@@ -723,7 +802,7 @@ class City:
         return Support(True)
 
     def submit(self, query: Query | Sequence[Query]) -> Job:
-        return Job(_EXECUTOR.submit(lambda: self.run(query)))
+        return _submit_job(lambda: self.run(query))
 
     def scenario(
         self,
@@ -1028,7 +1107,7 @@ class Scenario:
         return self.city._support(query, self)
 
     def submit(self, query: Query | Sequence[Query]) -> Job:
-        return Job(_EXECUTOR.submit(lambda: self.run(query)))
+        return _submit_job(lambda: self.run(query))
 
 
 def open(
